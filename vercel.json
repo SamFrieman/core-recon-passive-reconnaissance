@@ -11,7 +11,5 @@
     },
     { "src": "api/**/*.js", "use": "@vercel/node" }
   ],
-  "routes": [
-    { "src": "/api/(.*)", "dest": "/api/proxy.js" }
-  ]
+  
 }
