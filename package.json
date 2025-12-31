@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "start": "node start-all.js"
+    "start": "node start-all.js",
+    "vercel-build": "npm --prefix frontend run build"
   },
   "dependencies": {
     "express": "^4.18.2",
