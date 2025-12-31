@@ -6,8 +6,9 @@ export default async function handler(req, res) {
   }
 
   const url = new URL(req.url, target);
-  // Remove leading /api from path if present
-  const path = url.pathname.replace(/^\/api\/?/, '');
+  // Forward the full incoming path (keep /api prefix) so backend routes like
+  // /api/v1/... are preserved. Construct destination using the full pathname.
+  const path = url.pathname; // keep leading /api
   const dest = new URL(path + url.search, target);
 
   const init = {
