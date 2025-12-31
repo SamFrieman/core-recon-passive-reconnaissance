@@ -11,7 +11,7 @@ export const useRecon = () => {
     setError(null);
     try {
       const API_BASE = import.meta.env.VITE_API_URL || '/api';
-      const response = await axios.get(`${API_BASE}/v1/recon/${domain}`);
+      const response = await axios.get(`${API_BASE}/v1/recon`, { params: { domain } });
       setData(response.data);
     } catch (err) {
       setError(err.message || 'Scan failed');

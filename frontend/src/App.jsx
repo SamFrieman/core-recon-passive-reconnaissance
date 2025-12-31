@@ -271,7 +271,7 @@ export default function App() {
     try {
       // Use the sanitized input
       const API_BASE = import.meta.env.VITE_API_URL || '/api';
-      const response = await axios.get(`${API_BASE}/v1/recon/${encodeURIComponent(validation.sanitized)}`);
+      const response = await axios.get(`${API_BASE}/v1/recon`, { params: { domain: encodeURIComponent(validation.sanitized) } });
       setData(response.data);
     } catch (err) {
       const errorMsg = err.response?.data?.detail || err.message || 'Failed to connect to reconnaissance service';
@@ -1086,7 +1086,7 @@ export default function App() {
               <button 
                 onClick={() => {
                   const API_BASE = import.meta.env.VITE_API_URL || '/api';
-                  window.open(`${API_BASE}/v1/report/${domain}`, '_blank');
+                  window.open(`${API_BASE}/v1/report?domain=${encodeURIComponent(domain)}`, '_blank');
                 }}
                 className="bg-gradient-to-r from-cyan-600 to-cyan-500 hover:from-cyan-500 hover:to-cyan-400 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-cyan-500/20"
               >
