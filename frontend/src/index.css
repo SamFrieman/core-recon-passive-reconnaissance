@@ -1,0 +1,11 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Reset the Vite defaults that center everything */
+body {
+  margin: 0;
+  display: block; /* Changes from flex to block to allow normal scrolling */
+  background-color: #050505; /* Force the deep black background */
+  min-height: 100vh;
+}
