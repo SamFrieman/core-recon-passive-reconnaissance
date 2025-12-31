@@ -1,10 +1,16 @@
 {
   "version": 2,
   "builds": [
-    { "src": "frontend/package.json", "use": "@vercel/static-build" },
+    {
+      "src": "package.json",
+      "use": "@vercel/static-build",
+      "config": {
+        "distDir": "frontend/dist",
+        "buildCommand": "npm --prefix frontend run build"
+      }
+    },
     { "src": "api/**/*.js", "use": "@vercel/node" }
   ],
-  "outputDirectory": "frontend/dist",
   "routes": [
     { "src": "/api/(.*)", "dest": "/api/proxy.js" }
   ]
