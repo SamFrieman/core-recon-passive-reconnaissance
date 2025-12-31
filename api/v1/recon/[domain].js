@@ -1,14 +1,14 @@
-import dns from 'dns/promises';
-import axios from 'axios';
-import whois from 'whois-json';
+const dns = require('dns').promises;
+const axios = require('axios');
+const whois = require('whois-json');
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   try {
     const domain = req.query.domain || (req.url && req.url.split('/').pop());
     if (!domain) return res.status(400).json({ error: 'domain required' });
 
     // basic sanitization
-    const sanitized = String(domain).replace(/[^a-zA-Z0-9.\-]/g, '').toLowerCase();
+    const sanitized = String(domain).replace(/[^a-zA-Z0-9.\\-]/g, '').toLowerCase();
 
     const result = { target: sanitized };
 
