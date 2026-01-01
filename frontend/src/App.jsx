@@ -271,7 +271,7 @@ export default function App() {
     try {
       // Use the sanitized input
       const API_BASE = import.meta.env.VITE_API_URL || '/api';
-      const response = await axios.get(`${API_BASE}/v1/recon`, { params: { domain: encodeURIComponent(validation.sanitized) } });
+      const response = await axios.get(`${API_BASE}/v1/recon`, { params: { domain: validation.sanitized } });
       setData(response.data);
     } catch (err) {
       const errorMsg = err.response?.data?.detail || err.message || 'Failed to connect to reconnaissance service';

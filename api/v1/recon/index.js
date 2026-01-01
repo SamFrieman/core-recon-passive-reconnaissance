@@ -1,3 +1,16 @@
+// Delegate query-based requests to the dynamic [domain].js handler
+const domainHandler = require('./[domain].js');
+
+module.exports = async function handler(req, res) {
+  const domain = req.query && req.query.domain;
+  if (!domain) return res.status(400).json({ error: 'domain required' });
+
+  // Ensure domain is available to the dynamic handler
+  req.query = req.query || {};
+  req.query.domain = domain;
+
+  return domainHandler(req, res);
+};
 const dns = require('dns').promises;
 const axios = require('axios');
 const whois = require('whois-json');
