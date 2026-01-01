@@ -1,15 +1,13 @@
-// Delegate query-based requests to the dynamic [domain].js handler
-const domainHandler = require('./[domain].js');
-
+// Simple debug endpoint: echo the domain and basic reachability
 module.exports = async function handler(req, res) {
-  const domain = req.query && req.query.domain;
-  if (!domain) return res.status(400).json({ error: 'domain required' });
+  try {
+    const domain = req.query && req.query.domain;
+    if (!domain) return res.status(400).json({ error: 'domain required' });
 
-  // Ensure domain is available to the dynamic handler
-  req.query = req.query || {};
-  req.query.domain = domain;
-
-  return domainHandler(req, res);
+    return res.status(200).json({ ok: true, target: domain });
+  } catch (e) {
+    return res.status(500).json({ error: 'internal', detail: String(e) });
+  }
 };
 const dns = require('dns').promises;
 const axios = require('axios');
