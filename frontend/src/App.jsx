@@ -269,9 +269,10 @@ export default function App() {
     setInputWarning(null);
 
     try {
-      // Use the sanitized input
+      // Use the sanitized input in the URL path (not query params)
       const API_BASE = import.meta.env.VITE_API_URL || '/api';
-      const response = await axios.get(`${API_BASE}/v1/recon`, { params: { domain: validation.sanitized } });
+      const encodedDomain = encodeURIComponent(validation.sanitized);
+      const response = await axios.get(`${API_BASE}/v1/recon/${encodedDomain}`);
       setData(response.data);
     } catch (err) {
       const errorMsg = err.response?.data?.detail || err.message || 'Failed to connect to reconnaissance service';
@@ -279,7 +280,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  };
+ };
 
   const handleKeyPress = (e) => {
     if (e.key === 'Enter' && !loading) {
@@ -624,21 +625,16 @@ export default function App() {
 
         {/* Show more button */}
         {subdomains.length > displayLimit && (
-          <button
-            onClick={() => setShowAll(!showAll)}
-            className="w-full py-2 mt-3 text-xs text-cyan-500 hover:text-cyan-400 border border-gray-800 hover:border-cyan-500/50 rounded-lg transition-all flex items-center justify-center gap-2"
+          <button 
+            onClick={() => {
+              const API_BASE = import.meta.env.VITE_API_URL || '/api';
+              const encodedDomain = encodeURIComponent(data.target);
+              window.open(`${API_BASE}/v1/report/${encodedDomain}`, '_blank');
+            }}
+            className="bg-gradient-to-r from-cyan-600 to-cyan-500 hover:from-cyan-500 hover:to-cyan-400 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-cyan-500/20"
           >
-            {showAll ? (
-              <>
-                <ChevronUp className="w-4 h-4" />
-                Show Less
-              </>
-            ) : (
-              <>
-                <ChevronDown className="w-4 h-4" />
-                Show All ({subdomains.length - displayLimit} more)
-              </>
-            )}
+            <Download className="w-5 h-5" />
+            <span>Download Report</span>
           </button>
         )}
       </div>
@@ -1083,16 +1079,21 @@ export default function App() {
                   </div>
                 )}
               </div>
-              <button 
-                onClick={() => {
-                  const API_BASE = import.meta.env.VITE_API_URL || '/api';
-                  window.open(`${API_BASE}/v1/report?domain=${encodeURIComponent(domain)}`, '_blank');
-                }}
-                className="bg-gradient-to-r from-cyan-600 to-cyan-500 hover:from-cyan-500 hover:to-cyan-400 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-cyan-500/20"
-              >
-                <Download className="w-5 h-5" />
-                <span>Download Report</span>
-              </button>
+              // Replace your current report download button with this:
+// Replace your current report download button with this:
+          <button 
+            onClick={() => {
+              const API_BASE = import.meta.env.VITE_API_URL || '/api';
+              // Use the exact target from the scan data, not the original input
+              const targetDomain = data.target;
+              const encodedDomain = encodeURIComponent(targetDomain);
+              window.open(`${API_BASE}/v1/report/${encodedDomain}`, '_blank');
+            }}
+            className="bg-gradient-to-r from-cyan-600 to-cyan-500 hover:from-cyan-500 hover:to-cyan-400 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-cyan-500/20"
+          >
+            <Download className="w-5 h-5" />
+            <span>Download Report</span>
+          </button>
             </div>
 
             {/* Risk Assessment - Always Expanded */}
