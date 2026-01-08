@@ -54,6 +54,25 @@ npm install
 python -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 
 # Start the frontend (in another terminal)
+cd frontend
+npm run dev
+```
+
+If running into vite issues do a fresh npm install in frontend:
+```bash
+# Go to Frontend
+cd frontend
+
+# Clear any corrupted cache
+npm cache clean --force
+
+# Remove node_modules and package-lock.json
+rm -rf node_modules package-lock.json
+
+# Install dependencies fresh
+npm install
+
+# Now try running the dev server
 npm run dev
 ```
 
