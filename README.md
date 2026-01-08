@@ -75,7 +75,7 @@ npm install
 # Now try running the dev server
 npm run dev
 ```
-### ***Note that rm -rf node_modules package-lock.json is not neccesary and may result with an error. If error occurs move on***
+### *Note that rm -rf node_modules package-lock.json is not neccesary and may result with an error. If error occurs move on*
 
 Then open your browser to `http://localhost:5173`
 
