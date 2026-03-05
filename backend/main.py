@@ -8,6 +8,7 @@ import json
 from datetime import datetime
 from typing import Dict, Any, List
 import warnings
+import os
 warnings.filterwarnings("ignore", category=UserWarning, module="Wappalyzer")
 
 from Wappalyzer import Wappalyzer, WebPage
@@ -23,17 +24,22 @@ from urllib.parse import urlparse
 
 app = FastAPI(title="CoreRecon Intelligence API", version="1.0.0")
 
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*")
+origins = ["*"] if ALLOWED_ORIGINS == "*" else [o.strip() for o in ALLOWED_ORIGINS.split(",")]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=origins,
+    allow_credentials=False if ALLOWED_ORIGINS == "*" else True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ==================== DATABASE ====================
+DB_PATH = os.getenv("DB_PATH", "recon_history.db")
+
 def init_db():
-    conn = sqlite3.connect('recon_history.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS scans 
                  (domain TEXT PRIMARY KEY, 
@@ -1403,4 +1409,4 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+   uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
