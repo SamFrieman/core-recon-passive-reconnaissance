@@ -1,153 +1,143 @@
 """
-CoreRecon Input Normalizer
-Properly extracts scannable targets from any URL, domain, or IP input.
-Fixes the v1.0 bug where paths from URLs survived normalization.
+CoreRecon v2.0 — Input Normalization
+Accepts domains, URLs, IPs. Returns a NormalizedTarget dataclass.
 """
 import re
-import socket
+import ipaddress
 from dataclasses import dataclass
+from typing import Optional
 from urllib.parse import urlparse
 
-try:
-    import tldextract
-    _TLDEXTRACT_AVAILABLE = True
-except ImportError:
-    _TLDEXTRACT_AVAILABLE = False
+import tldextract
 
 from backend.core.errors import HardFailError
-
-# Regex patterns for IPv4 and IPv6 detection
-_IPV4_RE = re.compile(
-    r"^(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)$"
-)
-_IPV6_RE = re.compile(r"^\[?([0-9a-fA-F:]+)\]?$")
-
-# Characters safe in domain names
-_SAFE_CHARS_RE = re.compile(r"[^a-zA-Z0-9.\-_]")
 
 
 @dataclass
 class NormalizedTarget:
-    target: str            # clean domain or IP for all network operations
-    registered_domain: str # base domain for subdomain enumeration (e.g., example.co.uk)
-    input_type: str        # 'domain', 'ipv4', 'ipv6', 'url'
-    original_input: str    # unchanged for response transparency
+    target: str              # Clean hostname or IP used for all module calls
+    registered_domain: str   # eTLD+1 (e.g. "example.com") — used for WHOIS/subdomains
+    original_input: str      # Raw string as the user typed it
+    input_type: str          # "domain" | "ipv4" | "ipv6" | "url"
 
 
-def normalize_target(raw_input: str) -> NormalizedTarget:
+def sanitize_input(raw: str) -> str:
     """
-    Convert any user-supplied input into a NormalizedTarget.
-
-    Handles:
-    - Plain domains: example.com → example.com
-    - URLs with paths: https://example.com/path?q=1 → example.com
-    - Subdomains: sub.example.co.uk → sub.example.co.uk
-    - IPv4: 1.2.3.4 → 1.2.3.4
-    - IPv6: [::1] or 2001:db8::1 → 2001:db8::1
-    - Ports: example.com:8080 → example.com
-    - www prefix: preserved (www.example.com stays as-is for SSL/header checks)
+    Strip XSS / injection patterns. Returns cleaned string or raises ValueError.
+    Used by the report endpoint which doesn't go through normalize_target.
     """
-    if not raw_input or not raw_input.strip():
-        raise HardFailError("Input cannot be empty", code="EMPTY_INPUT")
-
-    original = raw_input.strip()
-
-    # Enforce max length
-    if len(original) > 255:
-        raise HardFailError("Input exceeds maximum length of 255 characters", code="INPUT_TOO_LONG")
-
-    # Strip common dangerous characters (XSS, injection prevention)
-    if re.search(r"[<>\"'`;]", original):
-        raise HardFailError("Input contains invalid characters", code="INVALID_CHARS")
-
-    working = original.lower()
-
-    # Strip protocol prefix for further parsing
-    if "://" in working:
-        parsed = urlparse(working if "://" in working else "https://" + working)
-        working = parsed.hostname or working
-    else:
-        # Handle bare paths like example.com/path
-        working = working.split("/")[0]
-
-    # Strip port numbers
-    if ":" in working and not working.startswith("["):
-        # Could be IPv6 or host:port
-        parts = working.rsplit(":", 1)
-        if parts[-1].isdigit():
-            working = parts[0]
-
-    # Strip surrounding brackets from IPv6
-    working = working.strip("[]")
-
-    if not working:
-        raise HardFailError("Could not extract a valid target from input", code="PARSE_FAILED")
-
-    # Detect IPv4
-    if _IPV4_RE.match(working):
-        return NormalizedTarget(
-            target=working,
-            registered_domain=working,
-            input_type="ipv4",
-            original_input=original,
-        )
-
-    # Detect IPv6
-    if _IPV6_RE.match(working) and ":" in working:
-        return NormalizedTarget(
-            target=working,
-            registered_domain=working,
-            input_type="ipv6",
-            original_input=original,
-        )
-
-    # Domain — use tldextract to get the registered domain
-    if _TLDEXTRACT_AVAILABLE:
-        extracted = tldextract.extract(working)
-        if extracted.domain and extracted.suffix:
-            registered = f"{extracted.domain}.{extracted.suffix}"
-            # Use the full subdomain+domain if a subdomain was given
-            if extracted.subdomain:
-                full_domain = f"{extracted.subdomain}.{registered}"
-            else:
-                full_domain = registered
-        else:
-            # Fallback: treat full string as domain
-            full_domain = working
-            registered = working
-    else:
-        # Fallback without tldextract
-        full_domain = working
-        parts = working.split(".")
-        registered = ".".join(parts[-2:]) if len(parts) >= 2 else working
-
-    # Final sanity check — domain characters only
-    if _SAFE_CHARS_RE.search(full_domain):
-        raise HardFailError(
-            f"Domain contains invalid characters after normalization: {full_domain}",
-            code="INVALID_DOMAIN",
-        )
-
-    return NormalizedTarget(
-        target=full_domain,
-        registered_domain=registered,
-        input_type="domain",
-        original_input=original,
-    )
-
-
-def sanitize_input(user_input: str) -> str:
-    """
-    Legacy-compatible sanitizer. Returns the cleaned target string.
-    Used by the report endpoint which operates on already-stored domain strings.
-    """
-    if not user_input:
+    if not raw or not raw.strip():
         raise ValueError("Input cannot be empty")
 
-    cleaned = re.sub(r"[<>\"\';`]", "", user_input.strip())
-    cleaned = re.sub(r"\s+", "", cleaned)
+    cleaned = raw.strip()
+
+    # XSS patterns
+    xss = [r"<[^>]*>", r"javascript:", r"on\w+\s*=", r"<iframe", r"<object", r"<embed"]
+    for pat in xss:
+        if re.search(pat, cleaned, re.IGNORECASE):
+            raise ValueError("Invalid characters detected in input")
+
+    # SQL injection patterns
+    sql = [
+        r"\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|EXECUTE|UNION|SCRIPT)\b",
+        r"(--|;|/\*|\*/)",
+        r"('|\"|`)",
+    ]
+    for pat in sql:
+        if re.search(pat, cleaned, re.IGNORECASE):
+            raise ValueError("Invalid input format")
+
+    # Strip to safe charset
+    cleaned = re.sub(r"[^\w.\-:/\[\]]", "", cleaned)
 
     if len(cleaned) > 255:
         raise ValueError("Input too long (max 255 characters)")
 
     return cleaned
+
+
+def normalize_target(raw: str) -> NormalizedTarget:
+    """
+    Parse and normalize any user-supplied target string into a NormalizedTarget.
+    Raises HardFailError on inputs that cannot be resolved to a valid target.
+    """
+    original = raw.strip()
+
+    if not original:
+        raise HardFailError("Target cannot be empty")
+
+    # --- Sanitize first ---
+    try:
+        cleaned = sanitize_input(original)
+    except ValueError as e:
+        raise HardFailError(str(e))
+
+    # --- Check for IPv4 ---
+    try:
+        ipaddress.IPv4Address(cleaned)
+        return NormalizedTarget(
+            target=cleaned,
+            registered_domain=cleaned,
+            original_input=original,
+            input_type="ipv4",
+        )
+    except ValueError:
+        pass
+
+    # --- Check for IPv6 (strip brackets if present) ---
+    ipv6_candidate = cleaned.strip("[]")
+    try:
+        ipaddress.IPv6Address(ipv6_candidate)
+        return NormalizedTarget(
+            target=ipv6_candidate,
+            registered_domain=ipv6_candidate,
+            original_input=original,
+            input_type="ipv6",
+        )
+    except ValueError:
+        pass
+
+    # --- URL: extract the hostname ---
+    if cleaned.startswith(("http://", "https://")):
+        parsed = urlparse(cleaned)
+        host = parsed.hostname or ""
+        if not host:
+            raise HardFailError(f"Could not extract hostname from URL: {cleaned}")
+        cleaned = host
+        input_type = "url"
+    else:
+        input_type = "domain"
+
+    # --- Strip www. prefix for cleaner target (modules add it back if needed) ---
+    if cleaned.startswith("www."):
+        cleaned = cleaned[4:]
+
+    # --- Use tldextract to validate and extract registered domain ---
+    extracted = tldextract.extract(cleaned)
+
+    # registered_domain = domain label + TLD suffix, e.g. "example.com"
+    # extracted.domain alone would be just "example" — that was the bug.
+    if extracted.registered_domain:
+        # Use the full registered domain (eTLD+1) as the target
+        target = extracted.registered_domain
+
+        # If there's a subdomain component, keep it for the target
+        # e.g. "sub.example.com" → target="sub.example.com", registered_domain="example.com"
+        if extracted.subdomain:
+            target = f"{extracted.subdomain}.{extracted.registered_domain}"
+    elif extracted.domain:
+        # Fallback: single-label hostname (intranet, localhost, etc.)
+        # Warn but allow — some environments use these
+        target = extracted.domain
+    else:
+        raise HardFailError(f"Cannot parse '{cleaned}' as a valid domain or IP address")
+
+    if not target:
+        raise HardFailError(f"Empty target after normalization of '{original}'")
+
+    return NormalizedTarget(
+        target=target,
+        registered_domain=extracted.registered_domain or target,
+        original_input=original,
+        input_type=input_type,
+    )
