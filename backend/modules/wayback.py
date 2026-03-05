@@ -11,7 +11,7 @@ from backend.core.logger import get_logger
 log = get_logger("corerecon.wayback")
 
 TIMEOUT_PRIMARY = 25
-TIMEOUT_CDX = 20
+TIMEOUT_CDX = 8
 
 
 def _parse_timestamp(ts: str) -> str:
