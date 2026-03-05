@@ -709,15 +709,33 @@ export default function App() {
   const TechnologyStack = ({ technologies }) => {
     const [expandedCategories, setExpandedCategories] = useState({});
 
+    const totalTechs = Object.values(technologies).reduce(
+      (sum, items) => sum + items.length, 0
+    );
+
     return (
       <div className="space-y-3">
-        {Object.entries(technologies).map(([category, items]) => {
-          const isExpanded = expandedCategories[category];
-          const displayItems = isExpanded ? items : items.slice(0, 3);
+        {/* Summary bar */}
+        <div className="flex items-center justify-between pb-3 border-b border-gray-800/50">
+          <div className="flex items-center gap-2">
+            <Cpu className="w-4 h-4 text-cyan-500" />
+            <span className="text-sm text-gray-400">Total Technologies Detected</span>
+          </div>
+          <span className="text-xl font-bold text-cyan-400">{totalTechs}</span>
+        </div>
 
+        {Object.entries(technologies).map(([category, items]) => {
+          const isExpanded = expandedCategories[category] !== false; // default expanded
+          
           return (
             <div key={category} className="border border-gray-800/50 rounded-lg overflow-hidden hover:border-gray-700/50 transition-colors">
-              <div className="bg-gray-900/30 px-4 py-3 flex items-center justify-between">
+              <button
+                onClick={() => setExpandedCategories(prev => ({
+                  ...prev,
+                  [category]: !isExpanded
+                }))}
+                className="w-full bg-gray-900/30 px-4 py-3 flex items-center justify-between hover:bg-gray-900/50 transition-colors"
+              >
                 <div className="flex items-center gap-3">
                   <Cpu className="w-4 h-4 text-cyan-500" />
                   <span className="text-xs font-bold text-cyan-400 uppercase tracking-wider">
@@ -727,47 +745,36 @@ export default function App() {
                     {items.length}
                   </span>
                 </div>
-                {items.length > 3 && (
-                  <button
-                    onClick={() => setExpandedCategories(prev => ({
-                      ...prev,
-                      [category]: !prev[category]
-                    }))}
-                    className="text-xs text-gray-500 hover:text-cyan-400 transition-colors flex items-center gap-1 px-3 py-1 rounded hover:bg-gray-800/50"
-                  >
-                    {isExpanded ? (
-                      <>
-                        <ChevronUp className="w-3 h-3" />
-                        <span>Show Less</span>
-                      </>
-                    ) : (
-                      <>
-                        <ChevronDown className="w-3 h-3" />
-                        <span>+{items.length - 3} more</span>
-                      </>
-                    )}
-                  </button>
+                {isExpanded ? (
+                  <ChevronUp className="w-4 h-4 text-gray-500" />
+                ) : (
+                  <ChevronDown className="w-4 h-4 text-gray-500" />
                 )}
-              </div>
-              <div className="p-4 space-y-2 bg-black/20">
-                {displayItems.map((item, idx) => (
-                  <div key={idx} className="flex items-center justify-between group hover:bg-gray-900/30 p-2 rounded transition-colors">
-                    <div className="flex items-center gap-2">
-                      <div className="w-1.5 h-1.5 bg-cyan-500/50 rounded-full group-hover:bg-cyan-500 transition-colors" />
-                      <span className="text-sm text-gray-400 group-hover:text-gray-300 transition-colors">
-                        {item.name}
-                      </span>
+              </button>
+
+              {isExpanded && (
+                <div className="p-4 space-y-2 bg-black/20">
+                  {items.map((item, idx) => (
+                    <div key={idx} className="flex items-center justify-between group hover:bg-gray-900/30 p-2 rounded transition-colors">
+                      <div className="flex items-center gap-2">
+                        <div className="w-1.5 h-1.5 bg-cyan-500/50 rounded-full group-hover:bg-cyan-500 transition-colors" />
+                        <span className="text-sm text-gray-400 group-hover:text-gray-300 transition-colors">
+                          {item.name}
+                        </span>
+                      </div>
+                      {item.version && item.version !== 'Undetected' ? (
+                        <span className="text-xs font-mono px-2.5 py-1 rounded text-cyan-400 bg-cyan-500/10 border border-cyan-500/20">
+                          v{item.version}
+                        </span>
+                      ) : (
+                        <span className="text-xs font-mono px-2.5 py-1 rounded text-gray-600 bg-gray-900/50 border border-gray-800">
+                          version unknown
+                        </span>
+                      )}
                     </div>
-                    <span className={`text-xs font-mono px-2.5 py-1 rounded ${
-                      item.version === 'Undetected' 
-                        ? 'text-gray-600 bg-gray-900/50 border border-gray-800' 
-                        : 'text-cyan-400 bg-cyan-500/10 border border-cyan-500/20'
-                    }`}>
-                      {item.version}
-                    </span>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           );
         })}
