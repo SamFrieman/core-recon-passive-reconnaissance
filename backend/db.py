@@ -82,7 +82,7 @@ def save_scan(domain: str, data: Dict[str, Any]) -> None:
                     data = excluded.data,
                     timestamp = CURRENT_TIMESTAMP,
                     scan_count = scan_count + 1
-            """, (domain, json.dumps(data)))
+            """, (domain, json.dumps(data, cls=_JSONEncoder)))
     except sqlite3.OperationalError as e:
         # Soft fail — don't crash the scan if history can't be saved
         log.warning("Failed to save scan to database", extra={"domain": domain, "error": str(e)})
