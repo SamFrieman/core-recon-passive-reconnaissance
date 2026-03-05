@@ -234,3 +234,4 @@ def _pg_get_all_history(limit: int) -> List[Dict[str, Any]]:
     except Exception as e:
         log.warning("PostgreSQL history list failed", extra={"error": str(e)})
         return []
+ 
