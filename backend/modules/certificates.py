@@ -132,7 +132,7 @@ def get_ssl_certificate(domain: str) -> Dict[str, Any]:
         sans: List[str] = []
         try:
             san_ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
-            sans = [name.value for name in san_ext.value]
+            sans = [str(name.value) for name in san_ext.value]
         except x509.ExtensionNotFound:
             pass
 
