@@ -6,6 +6,14 @@ PostgreSQL is available via DATABASE_URL env var — optional, additive.
 import os
 import json
 import sqlite3
+import ipaddress
+
+class _JSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (ipaddress.IPv4Address, ipaddress.IPv6Address,
+                            ipaddress.IPv4Network, ipaddress.IPv6Network)):
+            return str(obj)
+        return super().default(obj)
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional
