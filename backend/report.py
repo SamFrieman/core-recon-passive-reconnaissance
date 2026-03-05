@@ -649,4 +649,4 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.set_fill_color(0, 200, 255)
     pdf.rect(0, 294, 210, 3, "F")
 
-    return pdf.output(dest="S").encode("latin-1")
+    return bytes(pdf.output())
