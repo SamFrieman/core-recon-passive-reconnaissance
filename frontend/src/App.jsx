@@ -1079,8 +1079,6 @@ export default function App() {
                   </div>
                 )}
               </div>
-              // Replace your current report download button with this:
-// Replace your current report download button with this:
           <button 
             onClick={() => {
               const API_BASE = import.meta.env.VITE_API_URL || '/api';
