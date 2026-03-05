@@ -2,13 +2,13 @@
 CoreRecon WHOIS Intelligence Module
 Preserves v1 response structure exactly.
 """
+import concurrent.futures
 from datetime import datetime
 from typing import Dict, Any
 
 import whois
 
 from backend.core.logger import get_logger
-
 log = get_logger("corerecon.whois")
 
 
@@ -35,11 +35,51 @@ def _safe_str(val) -> str:
 def get_whois_data(domain: str) -> Dict[str, Any]:
     """
     WHOIS registration data lookup.
-    Returns v1-compatible structure with all existing fields.
+    Wrapped in a thread with a 15-second timeout to prevent
+    hanging on unresponsive WHOIS servers.
     """
-    try:
-        w = whois.whois(domain)
+    _TIMEOUT = 15
 
+    def _fetch():
+        return whois.whois(domain)
+
+    # Run whois in a thread so we can enforce a timeout
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_fetch)
+            try:
+                w = future.result(timeout=_TIMEOUT)
+            except concurrent.futures.TimeoutError:
+                log.warning("WHOIS timed out", extra={"domain": domain})
+                return {
+                    "registrar": "Timeout",
+                    "creation_date": "Unknown",
+                    "expiration_date": "Unknown",
+                    "updated_date": "Unknown",
+                    "status": "Unknown",
+                    "name_servers": [],
+                    "organization": "Timeout",
+                    "registrant_country": "Unknown",
+                    "dnssec": "Unknown",
+                    "note": "WHOIS lookup timed out after 15s — WHOIS server unresponsive or rate limiting.",
+                }
+    except Exception as e:
+        log.warning("WHOIS lookup failed", extra={"domain": domain, "error": str(e)})
+        return {
+            "registrar": "Private/Redacted",
+            "creation_date": "Unknown",
+            "expiration_date": "Unknown",
+            "updated_date": "Unknown",
+            "status": "Unknown",
+            "name_servers": [],
+            "organization": "Private/Redacted",
+            "registrant_country": "Unknown",
+            "dnssec": "Unknown",
+            "note": f"WHOIS lookup failed — possible privacy protection or unsupported TLD. Error: {str(e)[:100]}",
+        }
+
+    # Normal parsing path (same as before)
+    try:
         if not w or not w.domain_name:
             return {
                 "registrar": "Private/Redacted",
@@ -69,7 +109,6 @@ def get_whois_data(domain: str) -> Dict[str, Any]:
             status = "Unknown"
 
         result = {
-            # --- v1 fields preserved exactly ---
             "registrar": _safe_str(w.registrar),
             "creation_date": _safe_date(w.creation_date),
             "expiration_date": _safe_date(w.expiration_date),
@@ -85,7 +124,7 @@ def get_whois_data(domain: str) -> Dict[str, Any]:
         return result
 
     except Exception as e:
-        log.warning("WHOIS lookup failed", extra={"domain": domain, "error": str(e)})
+        log.warning("WHOIS parse failed", extra={"domain": domain, "error": str(e)})
         return {
             "registrar": "Private/Redacted",
             "creation_date": "Unknown",
@@ -96,5 +135,5 @@ def get_whois_data(domain: str) -> Dict[str, Any]:
             "organization": "Private/Redacted",
             "registrant_country": "Unknown",
             "dnssec": "Unknown",
-            "note": f"WHOIS lookup failed — possible privacy protection or unsupported TLD. Error: {str(e)[:100]}",
+            "note": f"WHOIS parse failed: {str(e)[:100]}",
         }
