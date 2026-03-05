@@ -3,6 +3,7 @@ CoreRecon Passive Subdomain Enumeration Module
 Sources: crt.sh (Certificate Transparency) + HackerTarget host search
 Preserves v1 output structure exactly. Adds risk classification per subdomain.
 """
+import json
 import re
 from typing import Dict, Any, List, Set
 
@@ -52,24 +53,52 @@ def _classify_subdomain_risk(subdomain: str) -> Dict[str, Any]:
 
 
 def _query_crtsh(domain: str) -> Set[str]:
-    """Query crt.sh Certificate Transparency logs."""
+    """Query crt.sh Certificate Transparency logs.
+    Caps response at 2MB to prevent memory issues on constrained hosts.
+    """
     subdomains: Set[str] = set()
+    _MAX_BYTES = 2_000_000  # 2MB cap
+
     try:
         resp = requests.get(
             f"https://crt.sh/?q=%.{domain}&output=json",
             timeout=TIMEOUT_CRTSH,
             headers={"Accept": "application/json"},
+            stream=True,
         )
         if resp.status_code != 200:
             log.warning("crt.sh returned non-200", extra={"domain": domain, "status": resp.status_code})
             return subdomains
 
-        entries = resp.json()
+        # Stream the response and cap at 2MB
+        content = b""
+        for chunk in resp.iter_content(chunk_size=65536):
+            content += chunk
+            if len(content) >= _MAX_BYTES:
+                log.warning(
+                    "crt.sh response truncated at 2MB",
+                    extra={"domain": domain, "bytes": len(content)},
+                )
+                break
+
+        # Parse whatever we got — truncated JSON will raise, which we catch below
+        try:
+            entries = json.loads(content)
+        except json.JSONDecodeError:
+            # Response was cut mid-stream; parse what we can line by line
+            entries = []
+            for line in content.decode("utf-8", errors="ignore").splitlines():
+                line = line.strip().rstrip(",")
+                if line.startswith("{") and line.endswith("}"):
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+
         for entry in entries:
             name_value = entry.get("name_value", "")
             for name in name_value.split("\n"):
                 name = name.strip().lower()
-                # Filter wildcards and off-domain entries
                 if "*" in name:
                     continue
                 if domain in name:
