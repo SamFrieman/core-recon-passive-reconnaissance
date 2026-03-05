@@ -1,10 +1,33 @@
-fastapi==0.104.1
-uvicorn==0.24.0
-python-whois==0.8.0
-dnspython==2.4.2
-requests==2.31.0
-python-wappalyzer==0.3.1
-fpdf==1.7.2
-cryptography==41.0.5
-tldextract==5.1.1
-setuptools
+# CoreRecon v2.0 — Backend Dependencies
+# All v1 dependencies preserved. New additions marked with # NEW
+
+# Web framework
+fastapi
+uvicorn[standard]
+
+# DNS resolution
+dnspython
+
+# WHOIS
+python-whois
+
+# HTTP client
+requests
+
+# Technology fingerprinting (preserved from v1)
+python-wappalyzer
+
+# PDF generation (preserved from v1)
+fpdf2
+
+# Certificate parsing (preserved from v1)
+cryptography
+
+# TLD extraction for input normalization # NEW
+tldextract
+
+# Rate limiting # NEW
+slowapi
+
+# Suppress SSL warnings in passive header checks
+urllib3
