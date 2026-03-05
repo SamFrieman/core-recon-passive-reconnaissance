@@ -13,8 +13,8 @@ from backend.core.errors import SoftFailError
 
 log = get_logger("corerecon.subdomains")
 
-TIMEOUT_CRTSH = 15
-TIMEOUT_HACKERTARGET = 10
+TIMEOUT_CRTSH = 30     
+TIMEOUT_HACKERTARGET = 20
 
 # Subdomain naming patterns that indicate elevated risk
 HIGH_RISK_PATTERNS = [
