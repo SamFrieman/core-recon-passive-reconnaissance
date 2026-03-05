@@ -70,7 +70,7 @@ def get_technology_stack(domain: str) -> Dict[str, Any]:
       eol_risk (bool), eol_note (str|None)
     These are additive fields within each technology entry.
     """
-    wappalyzer = Wappalyzer.latest()
+    wappalyzer = Wappalyzer.latest(update=False)
 
     for proto in ("https", "http"):
         try:
