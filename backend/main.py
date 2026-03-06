@@ -21,6 +21,9 @@ from backend.core.risk import calculate_risk_score
 from backend.modules.infrastructure import get_infrastructure
 from backend.modules.subdomains import discover_subdomains
 from backend.modules.wayback import query_wayback
+from fastapi import FastAPI
+
+app = FastAPI()
 
 # These modules exist in the v2.0 codebase and are imported as-is
 try:
