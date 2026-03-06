@@ -1,5 +1,5 @@
 """
-CoreRecon v2.1 — Main Scan Orchestrator
+CoreRecon v2.1 — Main Scan Orchestrator + API
 Coordinates all intelligence modules via concurrent execution and assembles
 the final scan result with intelligence correlations and executive summary.
 
@@ -7,23 +7,32 @@ v2.1 changes:
   Phase 6 — Concurrent module execution via ThreadPoolExecutor
   Phase 7 — Deterministic executive summary generated from scan findings
 """
+import io
 import time
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from datetime import datetime
 from typing import Any, Dict, List, Optional
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from backend.core.logger import get_logger
 from backend.core.correlations import correlate_intelligence
 from backend.core.asset_classifier import classify_assets
 from backend.core.exposure import detect_exposed_assets, summarise_exposure
 from backend.core.risk import calculate_risk_score
+from backend.core.cache import scan_cache
+from backend.core.errors import HardFailError
+from backend.core.normalizer import normalize_target
+from backend.db import init_db, save_scan, get_scan_history, get_scan_data, get_all_history
+from backend.report import generate_pdf_report
 
 # Module imports
 from backend.modules.infrastructure import get_infrastructure
 from backend.modules.subdomains import discover_subdomains
 from backend.modules.wayback import query_wayback
-from fastapi import FastAPI
-
-app = FastAPI()
 
 # These modules exist in the v2.0 codebase and are imported as-is
 try:
@@ -43,12 +52,141 @@ except ImportError:
 log = get_logger("corerecon.main")
 
 # ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+
+app = FastAPI(title="CoreRecon API", version="2.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("startup")
+async def startup_event():
+    init_db()
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+@app.get("/")
+async def root():
+    return {"status": "online", "service": "CoreRecon API", "version": "2.1.0"}
+
+
+@app.get("/api/v1/health")
+async def health():
+    return {
+        "status": "healthy",
+        "version": "2.1.0",
+        "cache_size": len(scan_cache),
+        "uptime": "ok",
+    }
+
+
+@app.get("/api/v1/recon/{domain:path}")
+async def recon(domain: str):
+    try:
+        normalized = normalize_target(domain)
+        target = normalized.target
+    except HardFailError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Return cached result if available
+    cached = scan_cache.get(target)
+    if cached:
+        return JSONResponse(content=cached)
+
+    # Run the scan
+    try:
+        result = run_scan(target)
+    except HardFailError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log.error(f"Scan failed for {target}: {e}")
+        raise HTTPException(status_code=500, detail=f"Scan failed: {str(e)}")
+
+    # Enrich with metadata
+    result["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    result["original_input"] = normalized.original_input
+    result["input_type"] = normalized.input_type
+
+    # Flat risk fields for frontend / PDF report compatibility
+    risk = result.get("risk", {})
+    result["risk_score"] = risk.get("score", 0)
+    result["risk_level"] = _score_to_level(risk.get("score", 0))
+    result["risk_status"] = _risk_status_text(target, risk.get("score", 0))
+    result["risk_issues"] = [i["issue"] for i in risk.get("risk_issues", [])]
+    result["recommendations"] = _build_recommendations(risk.get("risk_issues", []))
+
+    # Historical correlation
+    result["history_correlation"] = get_scan_history(target)
+
+    # Persist and cache
+    save_scan(target, result)
+    scan_cache.set(target, result)
+
+    return JSONResponse(content=result)
+
+
+@app.get("/api/v1/history")
+async def history():
+    return get_all_history()
+
+
+@app.get("/api/v1/report/{domain:path}")
+async def report(domain: str):
+    try:
+        normalized = normalize_target(domain)
+        target = normalized.target
+    except HardFailError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Try cache → DB → fresh scan
+    data = scan_cache.get(target) or get_scan_data(target)
+
+    if not data:
+        try:
+            data = run_scan(target)
+            data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            risk = data.get("risk", {})
+            data["risk_score"] = risk.get("score", 0)
+            data["risk_level"] = _score_to_level(risk.get("score", 0))
+            data["risk_status"] = _risk_status_text(target, risk.get("score", 0))
+            data["risk_issues"] = [i["issue"] for i in risk.get("risk_issues", [])]
+            data["recommendations"] = _build_recommendations(risk.get("risk_issues", []))
+            save_scan(target, data)
+            scan_cache.set(target, data)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Could not generate report: {str(e)}")
+
+    try:
+        pdf_bytes = generate_pdf_report(data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
+
+    filename = f"corerecon_{target.replace('.', '_')}.pdf"
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Module execution plan
 # ---------------------------------------------------------------------------
 # Each entry: (module_key, callable, positional_args, timeout_seconds)
 # Timeout is enforced per-module — slow modules fail gracefully.
 
 _MODULE_TIMEOUT = 45   # seconds per module before it's marked as timed out
+
 
 def _build_module_plan(target: str) -> List[tuple]:
     """Return the ordered module execution plan for a scan."""
@@ -394,3 +532,49 @@ def run_scan(target: str) -> Dict[str, Any]:
         # Diagnostics
         "module_timings":        module_timings,
     }
+
+
+# ---------------------------------------------------------------------------
+# API helpers
+# ---------------------------------------------------------------------------
+
+def _score_to_level(score: int) -> str:
+    if score >= 85:
+        return "MINIMAL"
+    if score >= 65:
+        return "LOW"
+    if score >= 40:
+        return "MEDIUM"
+    if score >= 20:
+        return "HIGH"
+    return "CRITICAL"
+
+
+def _risk_status_text(target: str, score: int) -> str:
+    level = _score_to_level(score)
+    messages = {
+        "MINIMAL": f"{target} demonstrates strong security hygiene. Few actionable findings detected.",
+        "LOW": f"{target} has a generally healthy posture with minor improvements recommended.",
+        "MEDIUM": f"{target} has several security gaps that should be addressed to reduce exposure.",
+        "HIGH": f"{target} has significant vulnerabilities. Remediation is strongly recommended.",
+        "CRITICAL": f"{target} has critical security weaknesses requiring immediate attention.",
+    }
+    return messages.get(level, "Assessment complete.")
+
+
+def _build_recommendations(risk_issues: list) -> list:
+    recs, seen = [], set()
+    priority_map = {
+        "tls": "Upgrade TLS configuration to TLS 1.3 and ensure certificate validity.",
+        "web_security": "Implement HSTS, CSP, X-Frame-Options, and other security headers.",
+        "dns": "Configure SPF, DMARC (quarantine/reject policy), and enable DNSSEC.",
+        "infrastructure": "Consider placing origin behind a CDN and close unnecessary exposed ports.",
+        "technology": "Update all software components to current supported versions.",
+        "exposure": "Review and restrict public access to sensitive subdomains and services.",
+    }
+    for issue in risk_issues:
+        cat = issue.get("category", "")
+        if cat not in seen and cat in priority_map:
+            recs.append(priority_map[cat])
+            seen.add(cat)
+    return recs
