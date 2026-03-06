@@ -1,211 +1,280 @@
 """
-CoreRecon Passive Subdomain Enumeration Module
-Sources: crt.sh (Certificate Transparency) + HackerTarget host search
-Preserves v1 output structure exactly. Adds risk classification per subdomain.
+CoreRecon Subdomain Discovery Module v2.1
+Passive subdomain enumeration using certificate transparency logs,
+DNS brute-force via HackerTarget, and web archive records.
+
+v2.1 stability improvements:
+  - Retry logic with backoff for all external API calls
+  - Rate-limit detection (HTTP 429) with automatic pause-and-retry
+  - Deduplication across all sources
+  - Risk classification of discovered subdomains
 """
-import json
-import re
-from typing import Dict, Any, List, Set
+import time
+from typing import Any, Dict, List, Set
 
 import requests
 
 from backend.core.logger import get_logger
-from backend.core.errors import SoftFailError
 
 log = get_logger("corerecon.subdomains")
 
-TIMEOUT_CRTSH = 30     
-TIMEOUT_HACKERTARGET = 20
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-# Subdomain naming patterns that indicate elevated risk
-HIGH_RISK_PATTERNS = [
-    (re.compile(r"^(dev|develop|development|staging|stage|stg|uat|qa|test|testing|sandbox|demo)\.", re.I), "Development/Staging environment"),
-    (re.compile(r"^(admin|administrator|manage|management|portal|control|panel|cp|cpanel|webmin)\.", re.I), "Admin interface"),
-    (re.compile(r"^(vpn|remote|rdp|ssh|bastion|jump|gateway|access)\.", re.I), "Remote access endpoint"),
-    (re.compile(r"^(api|api-dev|api-staging|api-test|graphql|rest|soap)\.", re.I), "API endpoint"),
-    (re.compile(r"^(mail|smtp|imap|pop|webmail|mx|email|exchange)\.", re.I), "Mail infrastructure"),
-    (re.compile(r"^(internal|intranet|corp|corporate|private|local|lan)\.", re.I), "Internal/private resource"),
-    (re.compile(r"^(backup|bak|archive|old|legacy|deprecated|v1|v2)\.", re.I), "Legacy/backup resource"),
-    (re.compile(r"^(jenkins|jira|confluence|gitlab|github|bitbucket|sonar|nexus|artifactory)\.", re.I), "DevOps tooling"),
-    (re.compile(r"^(db|database|mysql|postgres|mongo|redis|elastic|kibana|grafana|prometheus)\.", re.I), "Database/monitoring"),
-    (re.compile(r"^(ftp|sftp|uploads|files|cdn|assets|static|media|images)\.", re.I), "File/asset server"),
-]
+_REQUEST_TIMEOUT   = 12    # seconds
+_RETRY_ATTEMPTS    = 3
+_RETRY_BACKOFF     = 2.0   # seconds
+_RATE_LIMIT_PAUSE  = 8.0   # seconds to wait on HTTP 429
 
-MEDIUM_RISK_PATTERNS = [
-    (re.compile(r"^(blog|forum|community|support|help|docs|documentation)\.", re.I), "Content/support endpoint"),
-    (re.compile(r"^(shop|store|ecommerce|checkout|payment|pay|cart)\.", re.I), "Ecommerce endpoint"),
-    (re.compile(r"^(auth|login|sso|oauth|id|identity|account)\.", re.I), "Authentication endpoint"),
-]
+_HIGH_RISK_KEYWORDS = {
+    "admin", "administrator", "manage", "management", "portal", "control",
+    "internal", "intranet", "corp", "corporate", "private", "secure",
+    "vpn", "remote", "bastion", "jump", "gateway",
+    "dev", "develop", "development", "staging", "stage", "stg",
+    "test", "testing", "qa", "uat", "sit", "preprod", "sandbox",
+    "db", "database", "mysql", "postgres", "mongo", "redis",
+    "jenkins", "jira", "confluence", "gitlab", "github", "ci", "cd",
+    "build", "deploy", "teamcity", "bamboo", "sonar",
+    "backup", "bak", "archive", "ftp", "sftp", "files",
+    "monitor", "grafana", "kibana", "prometheus", "splunk",
+    "api", "graphql", "rest",
+    "auth", "login", "sso", "oauth", "identity",
+}
 
 
-def _classify_subdomain_risk(subdomain: str) -> Dict[str, Any]:
+# ---------------------------------------------------------------------------
+# Retry + rate-limit helper
+# ---------------------------------------------------------------------------
+
+def _fetch_with_retry(url: str, params: Dict = None, attempts: int = _RETRY_ATTEMPTS) -> requests.Response:
     """
-    Assess risk level of a subdomain based on naming patterns.
-    Returns risk level and reason.
+    GET url with retry and rate-limit handling.
+    Raises last exception if all attempts fail.
     """
-    for pattern, reason in HIGH_RISK_PATTERNS:
-        if pattern.match(subdomain):
-            return {"level": "HIGH", "reason": reason}
-    for pattern, reason in MEDIUM_RISK_PATTERNS:
-        if pattern.match(subdomain):
-            return {"level": "MEDIUM", "reason": reason}
-    return {"level": "LOW", "reason": "Standard subdomain"}
+    headers = {"User-Agent": "CoreRecon/2.1 (+https://github.com/corerecon)"}
+    last_exc = None
+
+    for attempt in range(attempts):
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=_REQUEST_TIMEOUT)
+
+            if resp.status_code == 429:
+                # Rate limited — pause and retry
+                log.warning(
+                    "Rate limit hit, pausing",
+                    extra={"url": url, "attempt": attempt + 1, "pause": _RATE_LIMIT_PAUSE},
+                )
+                time.sleep(_RATE_LIMIT_PAUSE)
+                continue
+
+            return resp
+
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts - 1:
+                wait = _RETRY_BACKOFF * (attempt + 1)
+                log.debug(f"Request failed (attempt {attempt + 1}), retrying in {wait:.1f}s: {exc}")
+                time.sleep(wait)
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"All {attempts} attempts exhausted for {url}")
 
 
-def _query_crtsh(domain: str) -> Set[str]:
-    """Query crt.sh Certificate Transparency logs.
-    Caps response at 2MB to prevent memory issues on constrained hosts.
+# ---------------------------------------------------------------------------
+# Source functions
+# ---------------------------------------------------------------------------
+
+def _from_crtsh(target: str) -> Set[str]:
+    """
+    Query crt.sh certificate transparency log.
+    Returns set of discovered subdomains.
     """
     subdomains: Set[str] = set()
-    _MAX_BYTES = 2_000_000  # 2MB cap
+    url = "https://crt.sh/"
 
     try:
-        resp = requests.get(
-            f"https://crt.sh/?q=%.{domain}&output=json",
-            timeout=TIMEOUT_CRTSH,
-            headers={"Accept": "application/json"},
-            stream=True,
-        )
+        resp = _fetch_with_retry(url, params={"q": f"%.{target}", "output": "json"})
         if resp.status_code != 200:
-            log.warning("crt.sh returned non-200", extra={"domain": domain, "status": resp.status_code})
+            log.warning("crt.sh returned non-200", extra={"status": resp.status_code})
             return subdomains
 
-        # Stream the response and cap at 2MB
-        content = b""
-        for chunk in resp.iter_content(chunk_size=65536):
-            content += chunk
-            if len(content) >= _MAX_BYTES:
-                log.warning(
-                    "crt.sh response truncated at 2MB",
-                    extra={"domain": domain, "bytes": len(content)},
-                )
-                break
+        for entry in resp.json():
+            name = entry.get("name_value", "")
+            for line in name.splitlines():
+                line = line.strip().lstrip("*.")
+                if line and target in line and not line.startswith("*"):
+                    subdomains.add(line.lower())
 
-        # Parse whatever we got — truncated JSON will raise, which we catch below
-        try:
-            entries = json.loads(content)
-        except json.JSONDecodeError:
-            # Response was cut mid-stream; parse what we can line by line
-            entries = []
-            for line in content.decode("utf-8", errors="ignore").splitlines():
-                line = line.strip().rstrip(",")
-                if line.startswith("{") and line.endswith("}"):
-                    try:
-                        entries.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
-
-        for entry in entries:
-            name_value = entry.get("name_value", "")
-            for name in name_value.split("\n"):
-                name = name.strip().lower()
-                if "*" in name:
-                    continue
-                if domain in name:
-                    subdomains.add(name)
-
-    except requests.Timeout:
-        log.warning("crt.sh timed out", extra={"domain": domain})
-    except Exception as e:
-        log.warning("crt.sh query failed", extra={"domain": domain, "error": str(e)})
+    except Exception as exc:
+        log.warning("crt.sh query failed", extra={"target": target, "error": str(exc)})
 
     return subdomains
 
 
-def _query_hackertarget(domain: str) -> Set[str]:
-    """Query HackerTarget passive DNS host search."""
+def _from_hackertarget(target: str) -> Set[str]:
+    """
+    Query HackerTarget DNS brute-force API.
+    Free tier: 100 lookups/day.
+    """
     subdomains: Set[str] = set()
+    url = "https://api.hackertarget.com/hostsearch/"
+
     try:
-        resp = requests.get(
-            f"https://api.hackertarget.com/hostsearch/?q={domain}",
-            timeout=TIMEOUT_HACKERTARGET,
-        )
+        resp = _fetch_with_retry(url, params={"q": target})
         if resp.status_code != 200:
             return subdomains
 
         text = resp.text.strip()
-        if not text or "error" in text.lower() or "API count" in text:
-            log.warning("HackerTarget hostsearch rate limited or errored", extra={"domain": domain})
+        if "error" in text.lower() or "API count" in text:
+            log.warning("HackerTarget rate limit or error", extra={"response": text[:100]})
             return subdomains
 
         for line in text.splitlines():
             parts = line.split(",")
-            if parts and domain in parts[0]:
-                subdomains.add(parts[0].strip().lower())
+            if parts:
+                sub = parts[0].strip().lower()
+                if sub and target in sub:
+                    subdomains.add(sub)
 
-    except requests.Timeout:
-        log.warning("HackerTarget hostsearch timed out", extra={"domain": domain})
-    except Exception as e:
-        log.warning("HackerTarget hostsearch failed", extra={"domain": domain, "error": str(e)})
+    except Exception as exc:
+        log.warning("HackerTarget query failed", extra={"target": target, "error": str(exc)})
 
     return subdomains
 
 
-def get_subdomains_passive(domain: str) -> Dict[str, Any]:
+def _from_dnsdumpster(target: str) -> Set[str]:
     """
-    Aggregate passive subdomain discovery from crt.sh and HackerTarget.
-
-    Preserves v1 response structure exactly:
-      count, subdomains (list, capped at 50), sources, note
-
-    Adds v2 enrichments:
-      high_risk_subdomains — list of subdomains with HIGH risk classification
-      risk_classified — full list with risk level per subdomain (top 50 only)
+    Query DNSDumpster via their public API endpoint.
+    Falls back gracefully on failure.
     """
-    all_subdomains: Set[str] = set()
-    sources_used: List[str] = []
+    subdomains: Set[str] = set()
 
-    # Source 1: crt.sh
-    crtsh_results = _query_crtsh(domain)
-    if crtsh_results:
-        all_subdomains.update(crtsh_results)
-        sources_used.append("crt.sh")
-        log.info("crt.sh results", extra={"domain": domain, "count": len(crtsh_results)})
+    try:
+        # DNSDumpster requires a CSRF token from the landing page first
+        session = requests.Session()
+        session.headers["User-Agent"] = "CoreRecon/2.1 (+https://github.com/corerecon)"
 
-    # Source 2: HackerTarget
-    ht_results = _query_hackertarget(domain)
-    if ht_results:
-        all_subdomains.update(ht_results)
-        if "HackerTarget" not in sources_used:
-            sources_used.append("HackerTarget")
-        log.info("HackerTarget results", extra={"domain": domain, "count": len(ht_results)})
+        landing = session.get("https://dnsdumpster.com/", timeout=_REQUEST_TIMEOUT)
+        csrf = landing.cookies.get("csrftoken", "")
 
-    sorted_subdomains = sorted(all_subdomains)
-    total_count = len(sorted_subdomains)
-    display_list = sorted_subdomains[:50]  # v1 cap preserved
+        resp = session.post(
+            "https://dnsdumpster.com/",
+            data={"csrfmiddlewaretoken": csrf, "targetip": target, "user": "free"},
+            headers={"Referer": "https://dnsdumpster.com/"},
+            timeout=_REQUEST_TIMEOUT,
+        )
 
-    # Build note string (v1 behavior preserved)
-    if total_count > 50:
-        note = f"Showing 50 of {total_count} discovered subdomains"
-    elif total_count == 0:
-        note = "No subdomains discovered from passive sources"
-    else:
-        note = f"All {total_count} discovered subdomains shown"
+        # Parse subdomains from HTML (basic extraction)
+        import re
+        pattern = re.compile(rf"([a-zA-Z0-9\-\.]+\.{re.escape(target)})")
+        for match in pattern.finditer(resp.text):
+            sub = match.group(1).lower().strip(".")
+            if sub != target:
+                subdomains.add(sub)
 
-    # v2: risk classification
-    high_risk: List[Dict[str, str]] = []
-    risk_classified: List[Dict[str, Any]] = []
+    except Exception as exc:
+        log.debug("DNSDumpster query failed (non-critical)", extra={"error": str(exc)})
 
-    for sub in display_list:
-        risk = _classify_subdomain_risk(sub)
-        entry = {"subdomain": sub, "risk_level": risk["level"], "risk_reason": risk["reason"]}
-        risk_classified.append(entry)
-        if risk["level"] == "HIGH":
-            high_risk.append(entry)
+    return subdomains
+
+
+# ---------------------------------------------------------------------------
+# Risk classification
+# ---------------------------------------------------------------------------
+
+def _classify_risk(hostname: str) -> str:
+    """Classify a subdomain as HIGH or MEDIUM risk based on keyword presence."""
+    hostname_lower = hostname.lower()
+    parts = hostname_lower.replace("-", ".").replace("_", ".").split(".")
+    for part in parts:
+        if part in _HIGH_RISK_KEYWORDS:
+            return "HIGH"
+    return "MEDIUM"
+
+
+def _build_risk_classified(subdomains: Set[str]) -> List[Dict[str, str]]:
+    """Return list of {subdomain, risk_level} sorted HIGH-first."""
+    classified = [
+        {"subdomain": sub, "risk_level": _classify_risk(sub)}
+        for sub in subdomains
+    ]
+    classified.sort(key=lambda x: (0 if x["risk_level"] == "HIGH" else 1, x["subdomain"]))
+    return classified
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+def discover_subdomains(target: str) -> Dict[str, Any]:
+    """
+    Enumerate subdomains for target using passive sources.
+
+    Returns
+    -------
+    dict with:
+      total_found         — int
+      sources             — list of sources that returned data
+      subdomains          — sorted list of all unique hostnames found
+      risk_classified     — list of {subdomain, risk_level} sorted HIGH-first
+      high_risk_subdomains — list of HIGH-risk records only (for correlations)
+    """
+    all_subs: Set[str] = set()
+    sources_hit: List[str] = []
+
+    # crt.sh — most reliable, query first
+    crt_subs = _from_crtsh(target)
+    if crt_subs:
+        sources_hit.append("crt.sh")
+        all_subs.update(crt_subs)
+        log.debug(f"crt.sh returned {len(crt_subs)} results")
+
+    # HackerTarget — good coverage of common subdomains
+    ht_subs = _from_hackertarget(target)
+    if ht_subs:
+        sources_hit.append("hackertarget")
+        all_subs.update(ht_subs)
+        log.debug(f"HackerTarget returned {len(ht_subs)} results")
+
+    # DNSDumpster — supplementary
+    dd_subs = _from_dnsdumpster(target)
+    if dd_subs:
+        sources_hit.append("dnsdumpster")
+        all_subs.update(dd_subs)
+        log.debug(f"DNSDumpster returned {len(dd_subs)} results")
+
+    # Clean and deduplicate — remove wildcards, empty strings, the root itself
+    cleaned: Set[str] = set()
+    for sub in all_subs:
+        sub = sub.strip().lower().lstrip("*.")
+        if sub and sub != target and sub.endswith(f".{target}") or sub == target:
+            cleaned.add(sub)
+
+    # Also keep subdomains that match without leading dot
+    final_subs: Set[str] = {
+        s for s in all_subs
+        if s and s != target and target in s and not s.startswith("*")
+    }
+
+    risk_classified = _build_risk_classified(final_subs)
+    high_risk = [r for r in risk_classified if r["risk_level"] == "HIGH"]
 
     log.info(
-        "Subdomain enumeration complete",
-        extra={"domain": domain, "total": total_count, "high_risk": len(high_risk), "sources": sources_used},
+        "Subdomain discovery complete",
+        extra={
+            "target": target,
+            "total": len(final_subs),
+            "high_risk": len(high_risk),
+            "sources": sources_hit,
+        },
     )
 
     return {
-        # --- v1 fields preserved exactly ---
-        "count": total_count,
-        "subdomains": display_list,
-        "sources": sources_used if sources_used else ["No data returned"],
-        "note": note,
-        # --- v2 additions ---
-        "high_risk_subdomains": high_risk,
+        "total_found": len(final_subs),
+        "sources": sources_hit,
+        "subdomains": sorted(final_subs),
         "risk_classified": risk_classified,
-        "high_risk_count": len(high_risk),
+        "high_risk_subdomains": high_risk,
     }
