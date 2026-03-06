@@ -279,4 +279,4 @@ def get_infrastructure(target: str, probe_ports: bool = True) -> Dict[str, Any]:
         },
     )
 
-    return result
+    return result 
