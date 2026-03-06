@@ -1,426 +1,457 @@
 """
-CoreRecon Risk Scoring Engine v2
-Replaces the flat additive model with a weighted, category-aware system.
+CoreRecon Risk Engine v2.1
+Computes a 0–100 security risk score from cross-module scan data.
 
-Why the replacement is justified:
-- v1 score could exceed 100 before clamping, making the math indefensible
-- v1 ignored DNS (SPF/DMARC), TLS algorithm quality, and technology risk entirely
-- v1 had no per-category breakdown, so users couldn't triage what to fix first
-- v2 is capped per-category (0-100), then composited — score is always defensible
-
-v1 API fields are preserved for backward compatibility:
-  risk_score, risk_level, risk_status, risk_issues, recommendations
-
-New fields added:
-  risk_breakdown, risk_confidence, risk_score_v2 (same as risk_score in this impl)
+v2.1 calibration changes vs v2.0:
+  - Category weights: TLS 25%, Web Security 25%, Infrastructure 15%,
+    DNS 15%, Technology 10%, Exposure 10%
+  - DNSSEC penalty reduced 15 → 10 pts (less critical than email auth)
+  - Compound SPF+DMARC absence penalty added (-8 pts bonus for having both)
+  - Self-signed cert penalty now exempts dev/staging subdomains
+  - Subdomain exposure count incorporated into exposure score
+  - Technology EOL signals weighted higher when high-risk subdomains present
 """
-from typing import Dict, Any, List, Tuple
+from typing import Any, Dict, List, Optional
+
+from backend.core.logger import get_logger
+
+log = get_logger("corerecon.risk")
+
 
 # ---------------------------------------------------------------------------
-# Category weights — must sum to 1.0
+# Category weights (must sum to 1.0)
 # ---------------------------------------------------------------------------
-CATEGORY_WEIGHTS = {
-    "tls":            0.25,  # Certificate validity, algorithm, TLS version
-    "web_security":   0.25,  # Security headers (CSP, HSTS, X-Frame, etc.)
-    "infrastructure": 0.20,  # HTTPS availability, HTTP-only access
-    "dns":            0.15,  # SPF, DMARC, DNSSEC
-    "technology":     0.10,  # EOL software, version exposure
-    "exposure":       0.05,  # Server banner, powered-by disclosure
+_WEIGHTS = {
+    "tls":            0.25,
+    "web_security":   0.25,
+    "infrastructure": 0.15,
+    "dns":            0.15,
+    "technology":     0.10,
+    "exposure":       0.10,
 }
 
-# ---------------------------------------------------------------------------
-# Risk level bands (applied to composite 0–100 score)
-# ---------------------------------------------------------------------------
-RISK_BANDS = [
-    (0,  15,  "MINIMAL",  "Excellent security posture with no significant findings"),
-    (16, 35,  "LOW",      "Good security posture with minor improvements recommended"),
-    (36, 60,  "MEDIUM",   "Moderate security concerns identified — remediation advised"),
-    (61, 80,  "HIGH",     "Significant security vulnerabilities found — prompt remediation required"),
-    (81, 100, "CRITICAL", "Critical security issues detected — immediate action required"),
-]
-
-
-def _get_level(score: int) -> Tuple[str, str]:
-    """Map a 0–100 score to a (level, status) tuple."""
-    for low, high, level, status in RISK_BANDS:
-        if low <= score <= high:
-            return level, status
-    return "CRITICAL", "Score out of expected range"
-
 
 # ---------------------------------------------------------------------------
-# Per-category scorers
-# Each returns: (category_score: int, findings: list[str], recommendations: list[str])
-# category_score is 0–100; higher = more risk in that category
+# Scoring helpers
 # ---------------------------------------------------------------------------
 
-def _score_tls(ssl: Dict, fingerprint: Dict) -> Tuple[int, List[str], List[str]]:
-    findings, recs = [], []
-    score = 0
-
-    if not ssl or "error" in ssl:
-        score += 100
-        findings.append("No SSL/TLS certificate — HTTPS unavailable")
-        recs.append("Deploy an SSL/TLS certificate. Let's Encrypt provides free certificates.")
-        return min(score, 100), findings, recs
-
-    days = ssl.get("days_remaining")
-    if days is not None:
-        if days < 0:
-            score += 60
-            findings.append("SSL certificate has EXPIRED")
-            recs.append("Renew the SSL certificate immediately — site is showing security errors to visitors.")
-        elif days <= 7:
-            score += 50
-            findings.append(f"SSL certificate expires in {days} days — critical renewal required")
-            recs.append("Renew the SSL certificate within 24 hours to prevent outage.")
-        elif days <= 30:
-            score += 30
-            findings.append(f"SSL certificate expires in {days} days")
-            recs.append("Renew the SSL certificate before it expires to maintain trust.")
-        elif days <= 90:
-            score += 10
-            findings.append(f"SSL certificate expiring in {days} days — renewal recommended soon")
-            recs.append("Schedule SSL certificate renewal within the next 30 days.")
-
-    algo = ssl.get("algorithm_analysis", {})
-    if algo.get("is_weak"):
-        score += 30
-        findings.append(f"Weak signature algorithm in use: {algo.get('algorithm', 'Unknown')}")
-        recs.append("Replace certificate with one using SHA-256 or better signature algorithm.")
-
-    if ssl.get("is_self_signed"):
-        score += 40
-        findings.append("Self-signed certificate detected — browsers will display security warnings")
-        recs.append("Replace self-signed certificate with one from a trusted Certificate Authority.")
-
-    tls_risk = ssl.get("tls_risk", "LOW")
-    if tls_risk == "CRITICAL":
-        score += 35
-        findings.append(f"Deprecated TLS version in use: {ssl.get('tls_version', 'Unknown')}")
-        recs.append("Disable TLS 1.0 and 1.1. Enforce TLS 1.2 minimum; prefer TLS 1.3.")
-    elif tls_risk == "HIGH":
-        score += 20
-        findings.append(f"Outdated TLS version: {ssl.get('tls_version', 'Unknown')}")
-        recs.append("Upgrade to TLS 1.2 or TLS 1.3 — TLS 1.1 is deprecated by all major browsers.")
-
-    return min(score, 100), findings, recs
+def _clamp(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
+    return max(lo, min(hi, value))
 
 
-def _score_web_security(fingerprint: Dict) -> Tuple[int, List[str], List[str]]:
-    findings, recs = [], []
-    score = 0
+def _score_tls(ssl: Dict[str, Any]) -> float:
+    """Score TLS posture. Higher score = better security."""
+    if not ssl or ssl.get("error"):
+        # No TLS data — assume worst case
+        return 20.0
 
-    if not fingerprint:
-        return 60, ["HTTP fingerprinting data unavailable"], []
+    score = 100.0
 
-    security = fingerprint.get("security", {})
-
-    # Header presence checks
-    header_penalties = {
-        "Strict-Transport-Security": (25, "Missing HSTS header — browsers may connect over HTTP",
-                                       "Add 'Strict-Transport-Security: max-age=31536000; includeSubDomains' to all HTTPS responses."),
-        "Content-Security-Policy":   (25, "Missing Content-Security-Policy header — XSS attacks unrestricted",
-                                       "Implement a Content-Security-Policy that restricts resource loading to trusted sources."),
-        "X-Frame-Options":           (15, "Missing X-Frame-Options header — site vulnerable to clickjacking",
-                                       "Add 'X-Frame-Options: DENY' or 'SAMEORIGIN' to prevent iframe embedding."),
-        "X-Content-Type-Options":    (10, "Missing X-Content-Type-Options header — MIME sniffing risk",
-                                       "Add 'X-Content-Type-Options: nosniff' to prevent MIME type confusion attacks."),
-        "Referrer-Policy":           (8,  "Missing Referrer-Policy header — URL leakage risk",
-                                       "Add 'Referrer-Policy: strict-origin-when-cross-origin' to limit referrer exposure."),
-        "Permissions-Policy":        (7,  "Missing Permissions-Policy header",
-                                       "Add Permissions-Policy to restrict browser feature access (camera, microphone, etc.)."),
-        "X-XSS-Protection":          (5,  "Missing X-XSS-Protection header",
-                                       "Add 'X-XSS-Protection: 1; mode=block' for legacy browser XSS protection."),
+    # TLS version risk
+    tls_risk = ssl.get("tls_risk", "UNKNOWN")
+    version_penalties = {
+        "CRITICAL": -50,   # SSLv2/SSLv3/TLS 1.0
+        "HIGH":     -35,   # TLS 1.1
+        "MEDIUM":   -15,   # TLS 1.2 with weak ciphers
+        "LOW":        0,   # TLS 1.2+ good
+        "UNKNOWN":  -10,
     }
+    score += version_penalties.get(tls_risk, -10)
 
-    for header, (penalty, finding, rec) in header_penalties.items():
-        val = security.get(header, "MISSING")
-        if val == "MISSING":
-            score += penalty
-            findings.append(finding)
-            recs.append(rec)
+    # Certificate validity
+    if ssl.get("cert_expired"):
+        score -= 30
+    elif ssl.get("cert_expiry_warning"):
+        score -= 10
 
-    # CSP quality analysis
-    csp_analysis = fingerprint.get("csp_analysis", {})
-    if csp_analysis.get("has_unsafe_inline") and security.get("Content-Security-Policy", "MISSING") != "MISSING":
-        score += 10
-        findings.append("CSP contains 'unsafe-inline' — inline script execution permitted")
-        recs.append("Remove 'unsafe-inline' from CSP and use nonces or hashes instead.")
-    if csp_analysis.get("has_unsafe_eval") and security.get("Content-Security-Policy", "MISSING") != "MISSING":
-        score += 8
-        findings.append("CSP contains 'unsafe-eval' — dynamic code execution permitted")
-        recs.append("Remove 'unsafe-eval' from CSP to prevent dynamic code execution attacks.")
+    # Self-signed certificate on a non-dev/staging asset
+    if ssl.get("self_signed") and not ssl.get("is_dev_environment", False):
+        score -= 20
+    elif ssl.get("self_signed"):
+        score -= 5   # Expected on dev environments, minor concern
 
-    # Protocol
+    # Weak cipher suites
+    if ssl.get("weak_ciphers"):
+        score -= 15
+
+    # Perfect Forward Secrecy
+    if ssl.get("pfs") is False:
+        score -= 10
+
+    return _clamp(score)
+
+
+def _score_web_security(fingerprint: Dict[str, Any]) -> float:
+    """Score HTTP security headers and web posture."""
+    if not fingerprint:
+        return 40.0
+
+    score = 100.0
+
+    # Security header grade (A–F)
+    grade_penalties = {
+        "A+": 0, "A": 0, "B": -10, "C": -20,
+        "D": -35, "F": -50, "?": -20,
+    }
+    grade = fingerprint.get("header_grade", "?")
+    score += grade_penalties.get(grade, -20)
+
+    # HSTS
+    if not fingerprint.get("hsts"):
+        score -= 15
+
+    # Content Security Policy
+    if not fingerprint.get("csp"):
+        score -= 10
+
+    # X-Frame-Options
+    if not fingerprint.get("x_frame_options"):
+        score -= 5
+
+    # X-Content-Type-Options
+    if not fingerprint.get("x_content_type_options"):
+        score -= 5
+
+    # Running over plain HTTP (no redirect to HTTPS)
     if fingerprint.get("protocol") == "HTTP":
-        score += 20
-        findings.append("Site accessible over unencrypted HTTP")
-        recs.append("Redirect all HTTP traffic to HTTPS and enforce HSTS.")
+        score -= 25
 
-    # Cookie security
-    cookie_analysis = fingerprint.get("cookie_analysis", {})
-    if cookie_analysis.get("insecure_count", 0) > 0:
-        score += 10
-        findings.append(f"{cookie_analysis['insecure_count']} cookie(s) missing security flags (Secure, HttpOnly, SameSite)")
-        recs.append("Set Secure, HttpOnly, and SameSite=Strict flags on all session cookies.")
-
-    return min(score, 100), findings, recs
+    return _clamp(score)
 
 
-def _score_infrastructure(infra: Dict, fingerprint: Dict) -> Tuple[int, List[str], List[str]]:
-    findings, recs = [], []
-    score = 0
+def _score_infrastructure(infrastructure: Dict[str, Any]) -> float:
+    """Score infrastructure exposure posture."""
+    if not infrastructure:
+        return 60.0
 
-    if not infra or infra.get("status") == "OFFLINE":
-        score = 30
-        findings.append("Domain resolves to offline or unreachable host")
-        return min(score, 100), findings, recs
+    score = 100.0
 
-    # HTTP-only already counted in web_security but flag here too at lower penalty
-    if fingerprint and fingerprint.get("protocol") == "HTTP":
-        score += 15
+    if not infrastructure.get("online", True):
+        return 100.0   # Offline — no exposure
 
-    # CDN/hosting provider observation (informational, minimal penalty)
-    cdn = infra.get("cdn", {})
-    if not cdn.get("detected") and infra.get("ip") not in ("Resolution Failed", None):
-        # No CDN — direct origin exposure — minor concern
+    # CDN protection adds points
+    cdn = infrastructure.get("cdn", {})
+    if cdn.get("detected"):
+        score += 10   # CDN hides origin, adds DDoS protection
+    else:
+        score -= 10   # Direct origin exposure
+
+    # Open non-standard ports
+    open_ports = infrastructure.get("open_ports", [])
+    risky_ports = {21, 23, 25, 110, 143, 445, 3306, 3389, 5432, 5900, 6379, 27017}
+    risky_open = [p for p in open_ports if p in risky_ports]
+    score -= len(risky_open) * 8
+
+    # Cloud provider (reduces self-managed risk)
+    if infrastructure.get("cloud_provider"):
         score += 5
-        findings.append("No CDN detected — origin server IP directly exposed")
-        recs.append("Consider deploying behind a CDN (e.g., Cloudflare) to mask origin IP and add DDoS protection.")
 
-    return min(score, 100), findings, recs
+    return _clamp(score)
 
 
-def _score_dns(dns: Dict) -> Tuple[int, List[str], List[str]]:
-    findings, recs = [], []
-    score = 0
-
+def _score_dns(dns: Dict[str, Any]) -> float:
+    """Score DNS security configuration."""
     if not dns:
-        return 40, ["DNS data unavailable"], []
+        return 40.0
+
+    score = 100.0
 
     # SPF
     spf = dns.get("spf", {})
     if not spf.get("present"):
-        score += 40
-        findings.append("No SPF record — domain vulnerable to email spoofing")
-        recs.append("Publish an SPF record in DNS to authorize legitimate mail senders.")
-    elif spf.get("risk") in ("HIGH", "CRITICAL"):
-        score += 20
-        findings.append(f"SPF record present but policy is weak: {spf.get('policy', 'Unknown')}")
-        recs.append("Strengthen SPF policy — use '-all' (hard fail) instead of '~all' or '?all'.")
-    elif spf.get("risk") == "MEDIUM":
-        score += 10
-        findings.append(f"SPF soft-fail policy — limited protection against spoofing")
-        recs.append("Consider upgrading SPF from '~all' to '-all' for stricter enforcement.")
+        score -= 20
+    elif spf.get("policy") in ("+all", "?all"):
+        score -= 15   # Overly permissive
 
     # DMARC
     dmarc = dns.get("dmarc", {})
     if not dmarc.get("present"):
-        score += 40
-        findings.append("No DMARC record — email authentication unenforced")
-        recs.append("Implement DMARC with at minimum p=quarantine to reduce phishing risk from your domain.")
+        score -= 25
     elif dmarc.get("policy") == "none":
-        score += 20
-        findings.append("DMARC policy is 'none' — monitoring only, no enforcement")
-        recs.append("Progress DMARC policy from 'none' to 'quarantine' then 'reject'.")
-    elif dmarc.get("policy") == "quarantine":
-        score += 5
-        findings.append("DMARC quarantine policy — good, but 'reject' provides stronger protection")
-        recs.append("Consider strengthening DMARC to p=reject for full enforcement.")
+        score -= 15
 
-    # DNSSEC
-    dnssec = dns.get("dnssec", {})
-    if not dnssec.get("enabled"):
-        score += 15
-        findings.append("DNSSEC not detected — DNS responses unvalidated")
-        recs.append("Enable DNSSEC signing to protect against DNS spoofing and cache poisoning.")
+    # Compound penalty: both SPF and DMARC absent (worst case for email security)
+    if not spf.get("present") and not dmarc.get("present"):
+        score -= 8   # Extra penalty on top of the individual deductions
 
-    return min(score, 100), findings, recs
+    # DNSSEC (v2.1: reduced from 15 to 10 — less critical than email auth)
+    if not dns.get("dnssec"):
+        score -= 10
+
+    # MX records without SPF is specifically bad
+    if dns.get("mx") and not spf.get("present"):
+        score -= 5
+
+    # CAA record (certificate authority authorisation)
+    if not dns.get("caa"):
+        score -= 5
+
+    return _clamp(score)
 
 
-def _score_technology(tech: Dict) -> Tuple[int, List[str], List[str]]:
-    findings, recs = [], []
-    score = 0
+def _score_technology(
+    technology: Dict[str, Any],
+    high_risk_subdomain_count: int = 0,
+) -> float:
+    """
+    Score technology stack security.
+    EOL risks are weighted higher when sensitive subdomains are present.
+    """
+    if not technology or not isinstance(technology, dict):
+        return 80.0
 
-    if not tech or "error" in tech:
-        return 0, [], []
+    score = 100.0
+    eol_count = 0
+    outdated_count = 0
 
-    eol_found = []
-    version_exposed = []
-
-    for category, tech_list in tech.items():
-        if not isinstance(tech_list, list):
+    for category, items in technology.items():
+        if not isinstance(items, list):
             continue
-        for t in tech_list:
-            if not isinstance(t, dict):
+        for item in items:
+            if not isinstance(item, dict):
                 continue
-            name = t.get("name", "Unknown")
-            version = t.get("version", "Undetected")
+            if item.get("eol_risk"):
+                eol_count += 1
+            elif item.get("outdated"):
+                outdated_count += 1
 
-            if t.get("eol_risk"):
-                eol_found.append(f"{name} {version}")
-                score += 20
+    # Base penalties
+    score -= eol_count * 20
+    score -= outdated_count * 8
 
-            if version and version != "Undetected":
-                version_exposed.append(f"{name} {version}")
+    # Amplify EOL penalty when high-risk subdomains are reachable
+    # Rationale: EOL software on domains with admin/dev/db subdomains = much larger blast radius
+    if eol_count > 0 and high_risk_subdomain_count > 0:
+        amplifier = min(high_risk_subdomain_count, 5)  # Cap amplification at 5 subdomains
+        score -= eol_count * amplifier * 3
 
-    if eol_found:
-        findings.append(f"End-of-life software detected: {', '.join(eol_found[:3])}" +
-                        (f" and {len(eol_found)-3} more" if len(eol_found) > 3 else ""))
-        recs.append("Update end-of-life software to current supported versions to receive security patches.")
-
-    if len(version_exposed) > 3:
-        score += 10
-        findings.append(f"Specific version strings exposed for {len(version_exposed)} technologies")
-        recs.append("Configure servers to suppress version disclosure in HTTP headers and error pages.")
-
-    return min(score, 100), findings, recs
+    return _clamp(score)
 
 
-def _score_exposure(fingerprint: Dict) -> Tuple[int, List[str], List[str]]:
-    findings, recs = [], []
-    score = 0
+def _score_exposure(
+    subdomains: Dict[str, Any],
+    exposed_assets: Optional[List[Dict]] = None,
+) -> float:
+    """Score exposure based on subdomain risk profile and detected exposed assets."""
+    score = 100.0
 
-    if not fingerprint:
-        return 0, [], []
+    # High-risk subdomains
+    high_risk = subdomains.get("high_risk_subdomains", [])
+    hr_count = len(high_risk)
+    if hr_count > 0:
+        score -= min(hr_count * 8, 40)   # Up to -40 for many high-risk subs
 
-    server = fingerprint.get("server", "")
-    if server and server not in ("Not disclosed", "Unreachable", "") and "/" in server:
-        score += 50
-        findings.append(f"Server version disclosed in banner: {server}")
-        recs.append("Configure your web server to suppress the Server header or remove version information.")
+    # Exposed assets from Phase 3 module
+    if exposed_assets:
+        sev_penalties = {"CRITICAL": 15, "HIGH": 10, "MEDIUM": 5, "LOW": 2}
+        for asset in exposed_assets:
+            score -= sev_penalties.get(asset.get("severity", "LOW"), 2)
 
-    powered_by = fingerprint.get("powered_by", "")
-    if powered_by and powered_by not in ("Not disclosed", ""):
-        score += 35
-        findings.append(f"X-Powered-By header exposes backend technology: {powered_by}")
-        recs.append("Remove or suppress the X-Powered-By header to reduce information exposure.")
+    # Total subdomain count (attack surface breadth)
+    total_subs = subdomains.get("total_found", 0)
+    if total_subs > 50:
+        score -= 10
+    elif total_subs > 20:
+        score -= 5
 
-    return min(score, 100), findings, recs
-
-
-# ---------------------------------------------------------------------------
-# Confidence rating based on data completeness
-# ---------------------------------------------------------------------------
-
-def _calculate_confidence(data: Dict) -> str:
-    """Rate how complete the scan data is — affects interpretive confidence."""
-    available = 0
-    total = 6
-
-    if data.get("ssl_certificate") and "error" not in data.get("ssl_certificate", {}):
-        available += 1
-    if data.get("fingerprint") and "error" not in data.get("fingerprint", {}):
-        available += 1
-    if data.get("dns") and data["dns"].get("A"):
-        available += 1
-    dns_intel = data.get("dns", {})
-    if dns_intel.get("spf") or dns_intel.get("dmarc"):
-        available += 1
-    if data.get("technology") and "error" not in data.get("technology", {}):
-        available += 1
-    if data.get("infrastructure") and data["infrastructure"].get("ip") != "Resolution Failed":
-        available += 1
-
-    ratio = available / total
-    if ratio >= 0.85:
-        return "HIGH"
-    elif ratio >= 0.6:
-        return "MEDIUM"
-    else:
-        return "LOW"
+    return _clamp(score)
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# Risk issue generator (produces the `risk_issues` list in API response)
 # ---------------------------------------------------------------------------
 
-def calculate_risk_score(data: Dict[str, Any]) -> Dict[str, Any]:
+def _build_risk_issues(
+    ssl: Dict,
+    fingerprint: Dict,
+    dns: Dict,
+    infrastructure: Dict,
+    technology: Dict,
+    subdomains: Dict,
+    exposed_assets: Optional[List[Dict]],
+) -> List[Dict[str, str]]:
     """
-    Weighted category-aware risk scoring.
-    Returns all v1 API fields plus v2 breakdown fields.
+    Generate a prioritised list of specific risk findings.
+    Each finding: {issue, severity, category}
     """
-    ssl = data.get("ssl_certificate", {})
-    fingerprint = data.get("fingerprint", {})
-    infra = data.get("infrastructure", {})
-    dns = data.get("dns", {})
-    tech = data.get("technology", {})
+    issues: List[Dict[str, str]] = []
 
-    # Score each category
-    tls_score,   tls_findings,   tls_recs   = _score_tls(ssl, fingerprint)
-    web_score,   web_findings,   web_recs   = _score_web_security(fingerprint)
-    infra_score, infra_findings, infra_recs = _score_infrastructure(infra, fingerprint)
-    dns_score,   dns_findings,   dns_recs   = _score_dns(dns)
-    tech_score,  tech_findings,  tech_recs  = _score_technology(tech)
-    exp_score,   exp_findings,   exp_recs   = _score_exposure(fingerprint)
+    def add(issue: str, severity: str, category: str) -> None:
+        issues.append({"issue": issue, "severity": severity, "category": category})
 
-    # Composite weighted score
-    composite = (
-        tls_score   * CATEGORY_WEIGHTS["tls"] +
-        web_score   * CATEGORY_WEIGHTS["web_security"] +
-        infra_score * CATEGORY_WEIGHTS["infrastructure"] +
-        dns_score   * CATEGORY_WEIGHTS["dns"] +
-        tech_score  * CATEGORY_WEIGHTS["technology"] +
-        exp_score   * CATEGORY_WEIGHTS["exposure"]
-    )
-    final_score = min(100, round(composite))
+    # --- TLS ---
+    if ssl and not ssl.get("error"):
+        tls_risk = ssl.get("tls_risk", "")
+        if tls_risk == "CRITICAL":
+            add(f"Critically weak TLS in use ({ssl.get('tls_version', 'unknown')}) — vulnerable to protocol downgrade attacks", "CRITICAL", "tls")
+        elif tls_risk == "HIGH":
+            add(f"Deprecated TLS version ({ssl.get('tls_version', 'unknown')}) — should upgrade to TLS 1.3", "HIGH", "tls")
+        if ssl.get("cert_expired"):
+            add("TLS certificate is expired — browsers will present security warnings", "HIGH", "tls")
+        elif ssl.get("cert_expiry_warning"):
+            add(f"TLS certificate expires soon ({ssl.get('cert_days_remaining', '?')} days remaining)", "MEDIUM", "tls")
+        if ssl.get("self_signed") and not ssl.get("is_dev_environment"):
+            add("Self-signed TLS certificate in use on production asset — no trusted CA validation", "HIGH", "tls")
+        if ssl.get("weak_ciphers"):
+            add("Weak TLS cipher suites detected — susceptible to cipher-downgrade attacks", "MEDIUM", "tls")
+        if ssl.get("pfs") is False:
+            add("Perfect Forward Secrecy (PFS) not supported — past traffic decryptable if key is compromised", "MEDIUM", "tls")
+    elif not ssl or ssl.get("error"):
+        add("Unable to retrieve TLS certificate — HTTPS may not be configured", "HIGH", "tls")
 
-    # Aggregate all findings and recommendations
-    all_findings = tls_findings + web_findings + infra_findings + dns_findings + tech_findings + exp_findings
-    all_recs = tls_recs + web_recs + infra_recs + dns_recs + tech_recs + exp_recs
+    # --- Web Security ---
+    if fingerprint:
+        grade = fingerprint.get("header_grade", "?")
+        if grade in ("D", "F"):
+            add(f"Poor security header posture (grade {grade}) — missing critical browser protection headers", "HIGH", "web_security")
+        elif grade == "C":
+            add(f"Weak security header posture (grade {grade}) — several important headers missing", "MEDIUM", "web_security")
+        if not fingerprint.get("hsts"):
+            add("HSTS (HTTP Strict Transport Security) not configured — allows HTTP downgrade attacks", "HIGH", "web_security")
+        if not fingerprint.get("csp"):
+            add("Content Security Policy (CSP) not configured — XSS attack surface is unrestricted", "MEDIUM", "web_security")
+        if fingerprint.get("protocol") == "HTTP":
+            add("Site accessible over unencrypted HTTP — all traffic is observable in transit", "HIGH", "web_security")
 
-    level, status = _get_level(final_score)
-    confidence = _calculate_confidence(data)
+    # --- DNS ---
+    if dns:
+        spf = dns.get("spf", {})
+        dmarc = dns.get("dmarc", {})
+        if not spf.get("present") and not dmarc.get("present"):
+            add(f"No SPF or DMARC records — domain can be freely spoofed in phishing attacks", "CRITICAL", "dns")
+        elif not dmarc.get("present"):
+            add("SPF configured but DMARC absent — email spoofing partially mitigated but From-header still spoofable", "HIGH", "dns")
+        elif dmarc.get("policy") == "none":
+            add("DMARC policy is 'none' (monitor-only) — no email spoofing enforcement active", "MEDIUM", "dns")
+        if not dns.get("dnssec"):
+            add("DNSSEC not enabled — DNS responses are not cryptographically authenticated", "MEDIUM", "dns")
+        if not dns.get("caa"):
+            add("No CAA record — any certificate authority can issue certificates for this domain", "LOW", "dns")
 
-    breakdown = {
-        "tls": {
-            "score": tls_score,
-            "weight": CATEGORY_WEIGHTS["tls"],
-            "weighted_contribution": round(tls_score * CATEGORY_WEIGHTS["tls"]),
-            "findings": tls_findings,
-        },
-        "web_security": {
-            "score": web_score,
-            "weight": CATEGORY_WEIGHTS["web_security"],
-            "weighted_contribution": round(web_score * CATEGORY_WEIGHTS["web_security"]),
-            "findings": web_findings,
-        },
-        "infrastructure": {
-            "score": infra_score,
-            "weight": CATEGORY_WEIGHTS["infrastructure"],
-            "weighted_contribution": round(infra_score * CATEGORY_WEIGHTS["infrastructure"]),
-            "findings": infra_findings,
-        },
-        "dns": {
-            "score": dns_score,
-            "weight": CATEGORY_WEIGHTS["dns"],
-            "weighted_contribution": round(dns_score * CATEGORY_WEIGHTS["dns"]),
-            "findings": dns_findings,
-        },
-        "technology": {
-            "score": tech_score,
-            "weight": CATEGORY_WEIGHTS["technology"],
-            "weighted_contribution": round(tech_score * CATEGORY_WEIGHTS["technology"]),
-            "findings": tech_findings,
-        },
-        "exposure": {
-            "score": exp_score,
-            "weight": CATEGORY_WEIGHTS["exposure"],
-            "weighted_contribution": round(exp_score * CATEGORY_WEIGHTS["exposure"]),
-            "findings": exp_findings,
-        },
+    # --- Infrastructure ---
+    if infrastructure:
+        cdn = infrastructure.get("cdn", {})
+        if not cdn.get("detected") and infrastructure.get("online"):
+            ip = infrastructure.get("ip", "unknown")
+            add(f"No CDN detected — origin server IP ({ip}) is directly exposed to the internet", "MEDIUM", "infrastructure")
+        risky_ports = {21: "FTP", 23: "Telnet", 25: "SMTP", 445: "SMB",
+                       3306: "MySQL", 3389: "RDP", 5432: "PostgreSQL",
+                       5900: "VNC", 6379: "Redis", 27017: "MongoDB"}
+        for port, service in risky_ports.items():
+            if port in infrastructure.get("open_ports", []):
+                add(f"Port {port} ({service}) is open — verify if internet exposure is intentional", "HIGH", "infrastructure")
+
+    # --- Technology ---
+    if technology and isinstance(technology, dict):
+        high_risk_count = len(subdomains.get("high_risk_subdomains", []))
+        for category, items in technology.items():
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("name", "Unknown")
+                version = item.get("version", "")
+                label = f"{name} {version}".strip()
+                if item.get("eol_risk"):
+                    sev = "CRITICAL" if high_risk_count > 0 else "HIGH"
+                    add(f"{label} has reached end-of-life and no longer receives security patches", sev, "technology")
+                elif item.get("outdated"):
+                    add(f"{label} is outdated — security patches available but not applied", "MEDIUM", "technology")
+
+    # --- Exposure ---
+    if exposed_assets:
+        for asset in exposed_assets[:5]:  # Top 5 only to avoid noise
+            if asset.get("severity") in ("CRITICAL", "HIGH"):
+                add(
+                    f"{asset['hostname']} — {asset['risk_reason']}",
+                    asset["severity"],
+                    "exposure",
+                )
+
+    # Sort by severity
+    _order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+    issues.sort(key=lambda x: _order.get(x.get("severity", "LOW"), 3))
+
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def calculate_risk_score(
+    ssl: Optional[Dict] = None,
+    fingerprint: Optional[Dict] = None,
+    dns: Optional[Dict] = None,
+    infrastructure: Optional[Dict] = None,
+    technology: Optional[Dict] = None,
+    subdomains: Optional[Dict] = None,
+    exposed_assets: Optional[List[Dict]] = None,
+) -> Dict[str, Any]:
+    """
+    Compute the overall risk score and risk issue list.
+
+    Returns
+    -------
+    dict with:
+      score           — 0 (critical risk) to 100 (best posture), int
+      grade           — A / B / C / D / F
+      category_scores — per-category breakdown
+      risk_issues     — prioritised list of specific findings
+    """
+    ssl = ssl or {}
+    fingerprint = fingerprint or {}
+    dns = dns or {}
+    infrastructure = infrastructure or {}
+    technology = technology or {}
+    subdomains = subdomains or {}
+    exposed_assets = exposed_assets or []
+
+    high_risk_sub_count = len(subdomains.get("high_risk_subdomains", []))
+
+    # Per-category scores
+    cat_scores = {
+        "tls":            _score_tls(ssl),
+        "web_security":   _score_web_security(fingerprint),
+        "infrastructure": _score_infrastructure(infrastructure),
+        "dns":            _score_dns(dns),
+        "technology":     _score_technology(technology, high_risk_sub_count),
+        "exposure":       _score_exposure(subdomains, exposed_assets),
     }
 
+    # Weighted aggregate
+    weighted = sum(cat_scores[cat] * weight for cat, weight in _WEIGHTS.items())
+    final_score = round(_clamp(weighted))
+
+    # Letter grade
+    if final_score >= 90:
+        grade = "A"
+    elif final_score >= 75:
+        grade = "B"
+    elif final_score >= 60:
+        grade = "C"
+    elif final_score >= 40:
+        grade = "D"
+    else:
+        grade = "F"
+
+    risk_issues = _build_risk_issues(
+        ssl, fingerprint, dns, infrastructure, technology, subdomains, exposed_assets
+    )
+
+    log.info(
+        "Risk score calculated",
+        extra={
+            "score": final_score,
+            "grade": grade,
+            "issues": len(risk_issues),
+        },
+    )
+
     return {
-        # --- v1 fields preserved exactly (same keys, same semantics) ---
-        "score":            final_score,
-        "level":            level,
-        "status":           status,
-        "issues":           all_findings,
-        "recommendations":  all_recs,
-        "issues_count":     len(all_findings),
-        # --- v2 additions ---
-        "risk_breakdown":   breakdown,
-        "risk_confidence":  confidence,
+        "score": final_score,
+        "grade": grade,
+        "category_scores": {k: round(v) for k, v in cat_scores.items()},
+        "risk_issues": risk_issues,
     }
