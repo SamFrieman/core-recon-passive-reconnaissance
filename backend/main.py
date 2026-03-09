@@ -1,14 +1,17 @@
 """
 CoreRecon v2.2 — Main Scan Orchestrator + API
 
-Architecture improvements over v2.1:
-  - Fixed module import aliases (v2.1 had stubs silently replacing real modules)
-  - ModuleRegistry pattern for extensible module management
-  - module_status now surface PASS/SOFT_FAIL/TIMEOUT with reasons
-  - Cleaner separation: orchestration vs. API layer
-  - Executive summary and correlations always included in response
+Security hardening (v2.2.1):
+  - CORS restricted to ALLOWED_ORIGINS env var (no wildcard)
+  - Rate limiting via slowapi: 10/min on /recon/, 5/min on /report/
+  - /api/v1/history and /api/v1/health gated behind X-Admin-Token header
+  - Input validation: hard cap 253 chars, blocks injection chars
+  - PDF filename sanitized
+  - Internal errors not leaked to clients
 """
 import io
+import os
+import re
 import time
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
@@ -16,9 +19,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from backend.core.logger import get_logger
 from backend.core.correlations import correlate_intelligence
@@ -28,18 +34,67 @@ from backend.core.risk import calculate_risk_score
 from backend.core.cache import scan_cache
 from backend.core.errors import HardFailError
 from backend.core.normalizer import normalize_target
+from backend.core.sanitizer import sanitize_target, SanitizationError
 from backend.db import init_db, save_scan, get_scan_history, get_scan_data, get_all_history
 from backend.report import generate_pdf_report
 
 log = get_logger("corerecon.main")
 
 # ---------------------------------------------------------------------------
-# Module imports — explicit, no silent stubs
-# Each module maps its real file path. Import errors surface immediately.
+# Security configuration
+# ---------------------------------------------------------------------------
+
+_ADMIN_TOKEN = os.getenv("CORERECON_ADMIN_TOKEN", "")
+_ALLOWED_ORIGINS_RAW = os.getenv("ALLOWED_ORIGINS", "")
+
+if _ALLOWED_ORIGINS_RAW.strip():
+    ALLOWED_ORIGINS = [o.strip() for o in _ALLOWED_ORIGINS_RAW.split(",") if o.strip()]
+else:
+    ALLOWED_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    log.warning(
+        "ALLOWED_ORIGINS env var not set — defaulting to localhost only. "
+        "Set ALLOWED_ORIGINS=https://yourdomain.com for production."
+    )
+
+
+def validate_scan_input(raw: str) -> str:
+    """
+    Thin wrapper: runs the full 8-layer sanitizer and converts
+    SanitizationError into a FastAPI HTTPException 400.
+    The safe client-facing reason is used; internal detail stays in logs.
+    """
+    try:
+        return sanitize_target(raw)
+    except SanitizationError as e:
+        raise HTTPException(status_code=400, detail=e.reason)
+
+
+async def require_admin(request: Request):
+    """
+    Dependency: enforces X-Admin-Token header.
+    Returns 503 if admin token is not configured server-side.
+    """
+    if not _ADMIN_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="Admin endpoints are not enabled on this instance"
+        )
+    token = request.headers.get("X-Admin-Token", "")
+    if token != _ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+# ---------------------------------------------------------------------------
+# Rate limiter
+# ---------------------------------------------------------------------------
+
+limiter = Limiter(key_func=get_remote_address)
+
+# ---------------------------------------------------------------------------
+# Module imports
 # ---------------------------------------------------------------------------
 
 def _import_module_fn(module_path: str, fn_name: str) -> Optional[Callable]:
-    """Import a module function, returning None and logging if missing."""
     try:
         import importlib
         mod = importlib.import_module(module_path)
@@ -49,7 +104,6 @@ def _import_module_fn(module_path: str, fn_name: str) -> Optional[Callable]:
         return None
 
 
-# Real module functions — using actual file names from backend/modules/
 _get_infrastructure  = _import_module_fn("backend.modules.infrastructure",  "get_infrastructure")
 _get_dns_records     = _import_module_fn("backend.modules.dns_intel",        "get_dns_records")
 _fingerprint_target  = _import_module_fn("backend.modules.web_headers",      "get_security_headers")
@@ -66,18 +120,16 @@ _detect_technology   = _import_module_fn("backend.modules.technology",       "ge
 
 @dataclass
 class ModuleSpec:
-    """Defines a single recon module's execution contract."""
     key: str
     fn: Optional[Callable]
     timeout_seconds: int
     description: str
-    critical: bool = False  # If True, failure raises HardFailError
+    critical: bool = False
 
     def is_available(self) -> bool:
         return self.fn is not None
 
 
-# Registry of all modules — add new modules here only
 MODULE_REGISTRY: List[ModuleSpec] = [
     ModuleSpec("infrastructure",  _get_infrastructure,  25,  "IP resolution, ASN, CDN detection, port probing"),
     ModuleSpec("dns",             _get_dns_records,     20,  "DNS records, SPF, DMARC, DNSSEC analysis"),
@@ -86,23 +138,26 @@ MODULE_REGISTRY: List[ModuleSpec] = [
     ModuleSpec("subdomains",      _discover_subdomains, 60,  "Certificate transparency, passive subdomain discovery"),
     ModuleSpec("wayback",         _query_wayback,       30,  "Web archive history and path intelligence"),
     ModuleSpec("whois",           _get_whois,           20,  "Domain registration and registrar data"),
-    ModuleSpec("technology",      _detect_technology,   20,  "Technology stack fingerprinting (Wappalyzer)"),
+    ModuleSpec("technology",      _detect_technology,   20,  "Technology stack fingerprinting"),
 ]
 
-MODULE_TIMEOUT_BUFFER = 15  # Extra seconds beyond longest module timeout
+MODULE_TIMEOUT_BUFFER = 15
 
 
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="CoreRecon API", version="2.2.0")
+app = FastAPI(title="CoreRecon API", version="2.2.1")
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET"],
     allow_headers=["*"],
 )
 
@@ -115,9 +170,11 @@ async def startup_event():
     log.info(
         "CoreRecon startup complete",
         extra={
-            "version": "2.2.0",
+            "version": "2.2.1",
             "modules_available": available,
             "modules_unavailable": unavailable,
+            "cors_origins": ALLOWED_ORIGINS,
+            "admin_token_set": bool(_ADMIN_TOKEN),
         },
     )
 
@@ -131,26 +188,33 @@ async def root():
     return {
         "status": "online",
         "service": "CoreRecon API",
-        "version": "2.2.0",
+        "version": "2.2.1",
         "modules": {m.key: m.is_available() for m in MODULE_REGISTRY},
     }
 
 
 @app.get("/api/v1/health")
-async def health():
+async def health(_: None = Depends(require_admin)):
+    """Admin-only. Requires X-Admin-Token header."""
     return {
         "status": "healthy",
-        "version": "2.2.0",
+        "version": "2.2.1",
         "cache_size": len(scan_cache),
-        "modules": {m.key: {"available": m.is_available(), "timeout": m.timeout_seconds} for m in MODULE_REGISTRY},
+        "modules": {
+            m.key: {"available": m.is_available(), "timeout": m.timeout_seconds}
+            for m in MODULE_REGISTRY
+        },
         "uptime": "ok",
     }
 
 
 @app.get("/api/v1/recon/{domain:path}")
-async def recon(domain: str):
+@limiter.limit("10/minute")
+async def recon(request: Request, domain: str):
+    validated = validate_scan_input(domain)
+
     try:
-        normalized = normalize_target(domain)
+        normalized = normalize_target(validated)
         target = normalized.target
     except HardFailError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -166,22 +230,19 @@ async def recon(domain: str):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         log.error(f"Scan failed for {target}: {e}")
-        raise HTTPException(status_code=500, detail=f"Scan failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Scan failed. Please try again.")
 
-    # Metadata enrichment
     result["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     result["original_input"] = normalized.original_input
     result["input_type"] = normalized.input_type
-    result["corerecon_version"] = "2.2.0"
+    result["corerecon_version"] = "2.2.1"
 
-    # Flat risk fields for frontend / PDF compatibility
     risk = result.get("risk", {})
     result["risk_score"] = risk.get("score", 0)
     result["risk_level"] = _score_to_level(risk.get("score", 0))
     result["risk_status"] = _risk_status_text(target, risk.get("score", 0))
     result["risk_issues"] = [i["issue"] for i in risk.get("risk_issues", [])]
     result["recommendations"] = _build_recommendations(risk.get("risk_issues", []))
-
     result["history_correlation"] = get_scan_history(target)
 
     save_scan(target, result)
@@ -191,14 +252,18 @@ async def recon(domain: str):
 
 
 @app.get("/api/v1/history")
-async def history():
+async def history(_: None = Depends(require_admin)):
+    """Admin-only. Requires X-Admin-Token header."""
     return get_all_history()
 
 
 @app.get("/api/v1/report/{domain:path}")
-async def report(domain: str):
+@limiter.limit("5/minute")
+async def report(request: Request, domain: str):
+    validated = validate_scan_input(domain)
+
     try:
-        normalized = normalize_target(domain)
+        normalized = normalize_target(validated)
         target = normalized.target
     except HardFailError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -218,18 +283,20 @@ async def report(domain: str):
             save_scan(target, data)
             scan_cache.set(target, data)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Could not generate report: {str(e)}")
+            log.error(f"Report generation failed for {target}: {e}")
+            raise HTTPException(status_code=500, detail="Could not generate report")
 
     try:
-        # Sanitize technology data — new fingerprinter returns {category: [list]}
-        # but can return {"note": "..."} when empty; PDF generator crashes on non-list values
         if "technology" in data:
             data["technology"] = _sanitize_technology_for_pdf(data["technology"])
         pdf_bytes = generate_pdf_report(data)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
+        log.error(f"PDF generation failed for {target}: {e}")
+        raise HTTPException(status_code=500, detail="PDF generation failed")
 
-    filename = f"corerecon_{target.replace('.', '_')}.pdf"
+    safe_target = re.sub(r"[^a-zA-Z0-9_\-.]", "_", target)
+    filename = f"corerecon_{safe_target}.pdf"
+
     return StreamingResponse(
         io.BytesIO(pdf_bytes),
         media_type="application/pdf",
@@ -242,14 +309,6 @@ async def report(domain: str):
 # ---------------------------------------------------------------------------
 
 def _run_modules_concurrently(target: str) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, float]]:
-    """
-    Execute all registered modules in parallel.
-
-    Returns:
-        results       — module_key → result dict
-        module_status — module_key → {status, reason, available}
-        module_timings — module_key → elapsed_seconds
-    """
     results: Dict[str, Any] = {}
     module_status: Dict[str, Any] = {}
     module_timings: Dict[str, float] = {}
@@ -278,7 +337,6 @@ def _run_modules_concurrently(target: str) -> Tuple[Dict[str, Any], Dict[str, An
                 results[spec.key] = result
                 module_status[spec.key] = {"status": "OK", "reason": None, "available": True}
                 module_timings[spec.key] = elapsed
-                log.debug(f"Module '{spec.key}' OK in {elapsed}s")
 
             except FuturesTimeoutError:
                 elapsed = round(spec.timeout_seconds, 2)
@@ -293,7 +351,7 @@ def _run_modules_concurrently(target: str) -> Tuple[Dict[str, Any], Dict[str, An
 
             except Exception as exc:
                 elapsed = round(time.monotonic() - t_start, 2)
-                results[spec.key] = {"error": str(exc)}
+                results[spec.key] = {"error": "Module failed"}
                 module_status[spec.key] = {
                     "status": "SOFT_FAIL",
                     "reason": str(exc)[:200],
@@ -306,7 +364,7 @@ def _run_modules_concurrently(target: str) -> Tuple[Dict[str, Any], Dict[str, An
 
 
 # ---------------------------------------------------------------------------
-# Executive summary generator
+# Executive summary
 # ---------------------------------------------------------------------------
 
 def _generate_executive_summary(
@@ -319,7 +377,6 @@ def _generate_executive_summary(
     correlations: List[Dict],
     asset_classification: List[Dict],
 ) -> Dict[str, Any]:
-    """Generate a deterministic, data-driven executive summary."""
     score = risk.get("score", 0)
     grade = risk.get("grade", "F")
     risk_issues = risk.get("risk_issues", [])
@@ -425,11 +482,9 @@ def _generate_executive_summary(
 # ---------------------------------------------------------------------------
 
 def run_scan(target: str) -> Dict[str, Any]:
-    """Execute a full CoreRecon passive scan against target."""
     scan_start = time.monotonic()
     log.info("Scan started", extra={"target": target})
 
-    # Phase 1: Concurrent module execution
     module_results, module_status, module_timings = _run_modules_concurrently(target)
 
     infrastructure  = module_results.get("infrastructure",  {}) or {}
@@ -441,18 +496,14 @@ def run_scan(target: str) -> Dict[str, Any]:
     whois           = module_results.get("whois",            {}) or {}
     technology      = module_results.get("technology",       {}) or {}
 
-    # Phase 2: Exposure detection
     all_subdomain_names = subdomains.get("subdomains", [])
     wayback_subs = wayback.get("subdomains_discovered", [])
     combined_subs = list(set(all_subdomain_names + wayback_subs))
 
     exposed_assets = detect_exposed_assets(combined_subs, target)
     exposure_summary = summarise_exposure(exposed_assets)
-
-    # Phase 3: Asset classification
     asset_classification = classify_assets(combined_subs, target)
 
-    # Phase 4: Risk scoring
     risk = calculate_risk_score(
         ssl=ssl_certificate,
         fingerprint=fingerprint,
@@ -463,7 +514,6 @@ def run_scan(target: str) -> Dict[str, Any]:
         exposed_assets=exposed_assets,
     )
 
-    # Phase 5: Intelligence correlations
     correlations = correlate_intelligence({
         "target": target,
         "dns": dns,
@@ -474,7 +524,6 @@ def run_scan(target: str) -> Dict[str, Any]:
         "technology": technology,
     })
 
-    # Phase 6: Executive summary
     executive_summary = _generate_executive_summary(
         target=target,
         risk=risk,
@@ -501,11 +550,8 @@ def run_scan(target: str) -> Dict[str, Any]:
     )
 
     return {
-        # Identity
         "target": target,
         "scan_duration_seconds": scan_duration,
-
-        # Module results (v2.0+ compatible)
         "infrastructure":  infrastructure,
         "dns":             dns,
         "fingerprint":     fingerprint,
@@ -514,23 +560,19 @@ def run_scan(target: str) -> Dict[str, Any]:
         "wayback":         wayback,
         "whois":           whois,
         "technology":      technology,
-
-        # Intelligence layers
         "risk":                      risk,
         "exposed_assets":            exposed_assets,
         "exposure_summary":          exposure_summary,
         "asset_classification":      asset_classification,
         "intelligence_correlations": correlations,
         "executive_summary":         executive_summary,
-
-        # Diagnostics — now always populated with real status
         "module_timings":  module_timings,
         "module_status":   module_status,
     }
 
 
 # ---------------------------------------------------------------------------
-# API helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _score_to_level(score: int) -> str:
@@ -553,21 +595,17 @@ def _risk_status_text(target: str, score: int) -> str:
 
 
 def _sanitize_technology_for_pdf(technology: Any) -> dict:
-    """
-    Ensure technology data is a dict of {category: [list of dicts]}.
-    The new fingerprinter can return {"note": "..."} or {"error": "..."}
-    when nothing is detected — both have string values, not lists.
-    The PDF generator calls .get() on list items and crashes on strings.
-    This normalises any non-list values out before PDF generation.
-    """
     if not isinstance(technology, dict):
         return {}
     sanitized = {}
     for cat, items in technology.items():
         if not isinstance(items, list):
-            continue  # drop "note", "error", and any other string/non-list values
-        # Ensure each item is a dict
-        clean_items = [i if isinstance(i, dict) else {"name": str(i), "version": "", "eol_risk": False, "eol_note": None} for i in items]
+            continue
+        clean_items = [
+            i if isinstance(i, dict)
+            else {"name": str(i), "version": "", "eol_risk": False, "eol_note": None}
+            for i in items
+        ]
         if clean_items:
             sanitized[cat] = clean_items
     return sanitized
