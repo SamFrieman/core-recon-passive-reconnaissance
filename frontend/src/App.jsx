@@ -498,23 +498,100 @@ function SubdomainList({ subdomains }) {
 
 /* Technology stack */
 function TechnologyStack({ technology }) {
-  const stack = technology?.detected_technologies ?? [];
-  if (!stack.length) return null;
+  if (!technology) return null;
+
+  // New module returns {category: [{name, version, eol_risk, eol_note}]}
+  // Old module returned {detected_technologies: [...]}
+  // Handle both gracefully
+  let categories = {};
+  if (technology.detected_technologies) {
+    // Legacy flat array — group under "Detected"
+    const arr = technology.detected_technologies;
+    if (!arr.length) return null;
+    categories = { "Detected": arr.map(t => ({ name: t.name ?? t, version: t.version, eol_risk: false, eol_note: null })) };
+  } else {
+    // New categorized object — filter out meta keys like "error"/"note"
+    Object.entries(technology).forEach(([cat, items]) => {
+      if (Array.isArray(items) && items.length) categories[cat] = items;
+    });
+  }
+
+  if (!Object.keys(categories).length) return null;
+
+  const totalCount = Object.values(categories).reduce((s, items) => s + items.length, 0);
+  const eolCount   = Object.values(categories).flat().filter(t => t.eol_risk).length;
+
+  // Category icon map
+  const catIcon = (cat) => {
+    const c = cat.toLowerCase();
+    if (c.includes("server"))     return "⬡";
+    if (c.includes("framework"))  return "◈";
+    if (c.includes("cms"))        return "▦";
+    if (c.includes("javascript") || c.includes("library")) return "◆";
+    if (c.includes("css"))        return "◇";
+    if (c.includes("cdn"))        return "◎";
+    if (c.includes("analytic"))   return "◉";
+    if (c.includes("security"))   return "◐";
+    if (c.includes("e-commerce") || c.includes("ecommerce")) return "◑";
+    if (c.includes("language"))   return "◭";
+    return "·";
+  };
+
   return (
     <div className="panel fade-up">
-      <div className="panel-header">
-        <span style={{ color: "var(--text-dim)" }}>⬡</span>
-        <span className="label">Technology Stack</span>
+      <div className="panel-header" style={{ justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ color: "var(--amber)" }}>⬡</span>
+          <span className="label">Technology Stack</span>
+        </div>
+        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+          <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{totalCount} detected</span>
+          {eolCount > 0 && (
+            <span style={{ fontSize: 10, color: "var(--red)", background: "rgba(255,80,80,0.08)", padding: "2px 6px", borderRadius: 2 }}>
+              ⚠ {eolCount} EOL
+            </span>
+          )}
+        </div>
       </div>
-      <div style={{ padding: "10px 14px", display: "flex", flexWrap: "wrap", gap: 6 }}>
-        {stack.map((tech, i) => (
-          <div key={i} style={{
-            padding: "3px 8px", background: "var(--bg3)",
-            border: "1px solid var(--border2)", borderRadius: 2,
-            fontSize: 11, color: "var(--text-mid)",
-          }}>
-            {tech.name ?? tech}
-            {tech.version && <span style={{ color: "var(--text-dim)", marginLeft: 4 }}>v{tech.version}</span>}
+
+      <div style={{ padding: "12px 14px", display: "flex", flexDirection: "column", gap: 14 }}>
+        {Object.entries(categories).map(([cat, items]) => (
+          <div key={cat}>
+            {/* Category header */}
+            <div style={{
+              display: "flex", alignItems: "center", gap: 6,
+              marginBottom: 8, paddingBottom: 4,
+              borderBottom: "1px solid var(--border)",
+            }}>
+              <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{catIcon(cat)}</span>
+              <span style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--text-dim)", textTransform: "uppercase" }}>{cat}</span>
+              <span style={{ fontSize: 10, color: "var(--border2)", marginLeft: 2 }}>({items.length})</span>
+            </div>
+
+            {/* Tech chips */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {items.map((tech, i) => (
+                <div key={i} style={{
+                  display: "flex", alignItems: "center", gap: 5,
+                  padding: "4px 9px",
+                  background: tech.eol_risk ? "rgba(255,80,80,0.07)" : "var(--bg3)",
+                  border: `1px solid ${tech.eol_risk ? "rgba(255,80,80,0.35)" : "var(--border2)"}`,
+                  borderRadius: 2,
+                  fontSize: 11,
+                  color: tech.eol_risk ? "var(--red)" : "var(--text-mid)",
+                  title: tech.eol_note ?? "",
+                  cursor: tech.eol_note ? "help" : "default",
+                }} title={tech.eol_note ?? undefined}>
+                  {tech.eol_risk && <span style={{ fontSize: 9, color: "var(--red)" }}>⚠</span>}
+                  <span>{tech.name}</span>
+                  {tech.version && tech.version !== "Detected" && (
+                    <span style={{ color: "var(--text-dim)", fontSize: 10, marginLeft: 1 }}>
+                      {tech.version}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         ))}
       </div>
@@ -928,8 +1005,10 @@ export default function App() {
                 <DnsPanel dns={data.dns} />
                 <TlsPanel ssl={data.ssl_certificate} />
                 <SubdomainList subdomains={data.subdomains} />
-                <TechnologyStack technology={data.technology} />
               </div>
+
+              {/* Tech stack — full width, categorized */}
+              <TechnologyStack technology={data.technology} />
 
               {/* WHOIS */}
               {data.whois && !data.whois.error && (
