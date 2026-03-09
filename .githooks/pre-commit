@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# CoreRecon pre-commit hook
+# Blocks commits containing .env files or hardcoded secret patterns.
+#
+# Install:
+#   cp .githooks/pre-commit .git/hooks/pre-commit
+#   chmod +x .git/hooks/pre-commit
+#
+# Or set globally for this repo:
+#   git config core.hooksPath .githooks
+
+set -euo pipefail
+
+ERRORS=0
+
+# ── 1. Block sensitive filenames ────────────────────────────────────────────
+BLOCKED_FILES=(
+    "\.env$"
+    "\.env\."
+    "\.pem$"
+    "\.key$"
+    "\.p12$"
+    "\.pfx$"
+    "id_rsa$"
+    "id_ed25519$"
+    "secrets\.ya?ml$"
+    "credentials\.json$"
+    "serviceaccount\.json$"
+)
+
+for pattern in "${BLOCKED_FILES[@]}"; do
+    MATCHES=$(git diff --cached --name-only | grep -E "$pattern" || true)
+    if [ -n "$MATCHES" ]; then
+        echo "❌ BLOCKED: Sensitive file detected in commit:"
+        echo "$MATCHES" | sed 's/^/   /'
+        ERRORS=$((ERRORS + 1))
+    fi
+done
+
+# ── 2. Block hardcoded secret patterns in file content ──────────────────────
+# Checks only staged text files — skips binaries.
+
+SECRET_PATTERNS=(
+    # Generic high-entropy assignments
+    'password\s*=\s*["\x27][^"\x27]{8,}'
+    'passwd\s*=\s*["\x27][^"\x27]{8,}'
+    'secret\s*=\s*["\x27][^"\x27]{8,}'
+    'api_key\s*=\s*["\x27][^"\x27]{8,}'
+    'apikey\s*=\s*["\x27][^"\x27]{8,}'
+    'auth_token\s*=\s*["\x27][^"\x27]{8,}'
+    'access_token\s*=\s*["\x27][^"\x27]{8,}'
+    'private_key\s*=\s*["\x27][^"\x27]{8,}'
+    # AWS
+    'AKIA[0-9A-Z]{16}'
+    'aws_secret_access_key\s*=\s*["\x27][^"\x27]+'
+    # Generic bearer tokens
+    'Bearer\s+[A-Za-z0-9\-_]{20,}'
+    # Private key blocks
+    '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----'
+    # Render / Vercel style env tokens
+    'rnd_[A-Za-z0-9]{20,}'
+    'vercel_token\s*=\s*["\x27][^"\x27]+'
+    # CoreRecon-specific
+    'CORERECON_ADMIN_TOKEN\s*=\s*[^\$][^\s]{4,}'
+)
+
+# Get list of staged files that are text
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
+
+for file in $STAGED_FILES; do
+    # Skip binary files
+    if ! git show ":$file" 2>/dev/null | file - | grep -q "text"; then
+        continue
+    fi
+
+    for pattern in "${SECRET_PATTERNS[@]}"; do
+        MATCH=$(git show ":$file" 2>/dev/null | grep -iE "$pattern" || true)
+        if [ -n "$MATCH" ]; then
+            echo "❌ BLOCKED: Possible secret in $file"
+            echo "   Pattern: $pattern"
+            echo "   Match:   $(echo "$MATCH" | head -1 | cut -c1-80)"
+            ERRORS=$((ERRORS + 1))
+            break  # one error per file is enough
+        fi
+    done
+done
+
+# ── 3. Warn if .env is not in .gitignore ────────────────────────────────────
+if ! grep -q '\.env' .gitignore 2>/dev/null; then
+    echo "⚠️  WARNING: .env does not appear in .gitignore"
+fi
+
+# ── Result ───────────────────────────────────────────────────────────────────
+if [ "$ERRORS" -gt 0 ]; then
+    echo ""
+    echo "🚫 Commit blocked — $ERRORS issue(s) found."
+    echo "   Remove or rotate the flagged secrets before committing."
+    echo "   To bypass in an emergency: git commit --no-verify"
+    exit 1
+fi
+
+echo "✅ Pre-commit security checks passed."
+exit 0
