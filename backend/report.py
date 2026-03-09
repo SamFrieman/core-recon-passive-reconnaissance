@@ -85,7 +85,7 @@ def generate_pdf_report(data: dict) -> bytes:
         pdf.ln(3)
         pdf.set_text_color(*C_VALUE)
 
-    def kv_grid(pairs, col_w=95):
+    def kv_grid(pairs, col_w=90):
         items = [p for p in pairs if str(p[1]) not in ("", "N/A", "Unknown", "None")]
         if not items:
             return
@@ -94,28 +94,31 @@ def generate_pdf_report(data: dict) -> bytes:
             bg = C_ROWEVEN if row % 2 == 0 else C_ROWODD
             pdf.set_fill_color(*bg)
             y = pdf.get_y()
+            pdf.set_x(10)
             pdf.rect(10, y, 190, 6, "F")
             for col, (key, val) in enumerate(items[idx:idx+2]):
-                x = 10 + col * col_w
-                pdf.set_xy(x + 2, y + 1)
+                pdf.set_xy(10 + col * col_w, y + 1)
                 pdf.set_font("Arial", "B", 7.5)
                 pdf.set_text_color(*C_LABEL)
-                pdf.cell(32, 4, st(key + ":"), ln=False)
+                pdf.cell(28, 4, st(key + ":"), ln=False)
                 pdf.set_font("Arial", "", 7.5)
                 pdf.set_text_color(*C_VALUE)
-                pdf.cell(col_w - 36, 4, st(str(val)[:58]), ln=False)
+                pdf.cell(col_w - 28, 4, st(str(val)[:60]), ln=False)
+            pdf.set_x(10)
             pdf.ln(6)
             row += 1
 
     def kv_full(key, val, color=None):
         if str(val) in ("", "N/A", "None"):
             return
+        pdf.set_x(10)
         pdf.set_font("Arial", "B", 7.5)
         pdf.set_text_color(*C_LABEL)
-        pdf.cell(38, 5, st(key + ":"), ln=False)
+        pdf.cell(35, 5, st(key + ":"), ln=False)   # x -> 45
+        pdf.set_x(45)                               # explicit reset in case auto-break shifted x
         pdf.set_font("Arial", "", 7.5)
         pdf.set_text_color(*(color if color else C_VALUE))
-        pdf.multi_cell(0, 5, st(str(val)))
+        pdf.multi_cell(150, 5, st(str(val)))        # 45+150=195, never reaches right margin
         pdf.set_text_color(*C_VALUE)
 
     def badge(text, r, g, b):
@@ -134,6 +137,11 @@ def generate_pdf_report(data: dict) -> bytes:
         pdf.set_draw_color(220, 228, 236)
         pdf.line(10, pdf.get_y(), 200, pdf.get_y())
         pdf.ln(3)
+
+    def safe_mc(txt, h=4.5):
+        """multi_cell that ALWAYS resets x to left margin first - prevents x-drift crashes."""
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(190, h, txt)
 
     # ====================================================================
     # COVER PAGE
@@ -259,7 +267,7 @@ def generate_pdf_report(data: dict) -> bytes:
     if risk_status:
         pdf.set_font("Arial", "", 8)
         pdf.set_text_color(*C_VALUE)
-        pdf.multi_cell(0, 4.5, st(risk_status))
+        safe_mc(st(risk_status), 4.5)
         pdf.ln(2)
 
     divider()
@@ -278,10 +286,11 @@ def generate_pdf_report(data: dict) -> bytes:
             pdf.set_xy(13, y0 + 2)
             pdf.set_font("Arial", "B", 8)
             pdf.set_text_color(*C_DANGER)
-            pdf.cell(7, 4, f"{i}.", ln=False)
+            pdf.cell(7, 4, f"{i}.", ln=False)   # x -> 20
+            pdf.set_x(20)                        # explicit guard
             pdf.set_font("Arial", "", 8)
             pdf.set_text_color(*C_VALUE)
-            pdf.multi_cell(173, 4.5, st(issue))
+            pdf.multi_cell(173, 4.5, st(issue))  # 20+173=193
     else:
         pdf.set_fill_color(240, 252, 244)
         pdf.rect(10, pdf.get_y(), 190, 8, "F")
@@ -306,10 +315,11 @@ def generate_pdf_report(data: dict) -> bytes:
             pdf.set_xy(13, y0 + 2)
             pdf.set_font("Arial", "B", 8)
             pdf.set_text_color(*C_SECTION)
-            pdf.cell(7, 4, f"{i}.", ln=False)
+            pdf.cell(7, 4, f"{i}.", ln=False)   # x -> 20
+            pdf.set_x(20)                        # explicit guard
             pdf.set_font("Arial", "", 8)
             pdf.set_text_color(*C_VALUE)
-            pdf.multi_cell(173, 4.5, st(rec))
+            pdf.multi_cell(173, 4.5, st(rec))    # 20+173=193
         if len(recommendations) > 6:
             pdf.set_font("Arial", "I", 7)
             pdf.set_text_color(*C_LABEL)
@@ -410,22 +420,24 @@ def generate_pdf_report(data: dict) -> bytes:
         pdf.set_fill_color(230, 235, 245)
         pdf.set_font("Arial", "B", 7.5)
         pdf.set_text_color(*C_VALUE)
-        pdf.cell(130, 5.5, "Header", 0, 0, "L", True)
-        pdf.cell(35, 5.5, "Status", 0, 1, "C", True)
+        pdf.set_x(10)
+        pdf.cell(140, 5.5, "Header", 0, 0, "L", True)
+        pdf.cell(50, 5.5, "Status", 0, 1, "C", True)
         pdf.set_font("Arial", "", 7.5)
         for i, (head, val) in enumerate(security_headers.items()):
             bg = C_ROWEVEN if i % 2 == 0 else C_ROWODD
             pdf.set_fill_color(*bg)
+            pdf.set_x(10)
             pdf.set_text_color(*C_VALUE)
-            pdf.cell(130, 5, st(head.replace("-", " ").title()), 0, 0, "L", True)
+            pdf.cell(140, 5, st(head.replace("-", " ").title()), 0, 0, "L", True)
             if val == "MISSING":
                 pdf.set_fill_color(255, 243, 243)
                 pdf.set_text_color(*C_DANGER)
-                pdf.cell(35, 5, "MISSING", 0, 1, "C", True)
+                pdf.cell(50, 5, "MISSING", 0, 1, "C", True)
             else:
                 pdf.set_fill_color(240, 252, 244)
                 pdf.set_text_color(*C_SUCCESS)
-                pdf.cell(35, 5, "SET", 0, 1, "C", True)
+                pdf.cell(50, 5, "SET", 0, 1, "C", True)
             pdf.set_text_color(*C_VALUE)
 
     # ====================================================================
@@ -453,8 +465,8 @@ def generate_pdf_report(data: dict) -> bytes:
         badge(cert_status, *cert_color)
         pdf.set_font("Arial", "", 7.5)
         pdf.set_text_color(*C_LABEL)
-        pdf.write(5, f"   {days_remaining} days remaining")
-        pdf.ln(8)
+        pdf.cell(0, 5, f"   {days_remaining} days remaining", ln=True)
+        pdf.ln(3)
 
         kv_grid([
             ("TLS Version",    ssl_data.get("tls_version", "")),
@@ -610,6 +622,7 @@ def generate_pdf_report(data: dict) -> bytes:
             pdf.set_fill_color(230, 235, 245)
             pdf.set_font("Arial", "B", 7)
             pdf.set_text_color(*C_VALUE)
+            pdf.set_x(10)
             pdf.cell(100, 5, "Technology", 0, 0, "L", True)
             pdf.cell(40,  5, "Version",    0, 0, "C", True)
             pdf.cell(50,  5, "EOL Risk",   0, 1, "C", True)
@@ -742,7 +755,8 @@ def generate_pdf_report(data: dict) -> bytes:
         pdf.set_xy(14, pdf.get_y() + 3)
         pdf.set_font("Arial", "", 8)
         pdf.set_text_color(*C_WARN)
-        pdf.multi_cell(0, 4, st(msg))
+        pdf.set_x(14)                   # explicit guard before multi_cell
+        pdf.multi_cell(176, 4, st(msg)) # 14+176=190
 
     # ====================================================================
     # SECTION 09 - SUMMARY
@@ -757,17 +771,16 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.set_font("Arial", "B", 8)
     pdf.set_text_color(*C_VALUE)
     pdf.cell(0, 4.5, "Final Security Assessment", ln=True)
-    pdf.set_x(14)
     pdf.set_font("Arial", "", 7.5)
     pdf.set_text_color(*C_LABEL)
-    pdf.multi_cell(
-        180, 4.5,
+    safe_mc(
         st(
             f"Target '{target}' received a risk score of {risk_score}/100 "
             f"with threat classification: {risk_level}. This assessment is based on "
             f"passive reconnaissance and should form part of a comprehensive security "
             f"evaluation programme."
-        )
+        ),
+        4.5
     )
     pdf.ln(4)
     divider()
@@ -793,12 +806,12 @@ def generate_pdf_report(data: dict) -> bytes:
 
     pdf.set_font("Arial", "I", 7)
     pdf.set_text_color(*C_LABEL)
-    pdf.multi_cell(
-        0, 4,
+    safe_mc(
         "DISCLAIMER: This report contains information gathered through passive reconnaissance "
         "techniques and is intended for authorised security testing and research purposes only. "
         "Accuracy may vary based on target configuration at time of scanning. Always obtain "
-        "proper authorisation before conducting security assessments."
+        "proper authorisation before conducting security assessments.",
+        4
     )
 
     pdf.ln(4)
