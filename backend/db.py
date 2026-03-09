@@ -8,6 +8,7 @@ v2.2.1: All domain parameters sanitized via sanitize_db_param before
         queries (?/%s placeholders); sanitize_db_param is a secondary layer.
 """
 import os
+import stat
 import json
 import sqlite3
 import ipaddress
@@ -69,6 +70,15 @@ def init_db() -> None:
                 scan_count INTEGER DEFAULT 1
             )
         """)
+
+    # Lock down the DB file to owner read/write only (chmod 600).
+    # Prevents other OS users on the same host reading scan history.
+    # Safe to call repeatedly — only changes mode, never fails if already set.
+    try:
+        os.chmod(DB_PATH, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError as e:
+        log.warning("Could not set DB file permissions", extra={"path": DB_PATH, "error": str(e)})
+
     log.info("Database initialized", extra={"backend": "sqlite", "path": DB_PATH})
 
 
