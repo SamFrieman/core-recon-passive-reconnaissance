@@ -2,6 +2,10 @@
 CoreRecon Database Abstraction Layer
 SQLite is the default and remains fully supported.
 PostgreSQL is available via DATABASE_URL env var — optional, additive.
+
+v2.2.1: All domain parameters sanitized via sanitize_db_param before
+        being passed to queries. Primary defence is always parameterised
+        queries (?/%s placeholders); sanitize_db_param is a secondary layer.
 """
 import os
 import json
@@ -14,11 +18,13 @@ class _JSONEncoder(json.JSONEncoder):
                             ipaddress.IPv4Network, ipaddress.IPv6Network)):
             return str(obj)
         return super().default(obj)
+
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from backend.core.logger import get_logger
+from backend.core.sanitizer import sanitize_db_param, SanitizationError
 
 log = get_logger("corerecon.db")
 
@@ -68,6 +74,13 @@ def init_db() -> None:
 
 def save_scan(domain: str, data: Dict[str, Any]) -> None:
     """Upsert a scan result. Increments scan_count on repeat scans."""
+    # Secondary defence: sanitize before parameterised query
+    try:
+        domain = sanitize_db_param(domain)
+    except SanitizationError as e:
+        log.warning("save_scan rejected unsafe domain", extra={"reason": e.reason})
+        return
+
     if _USE_POSTGRES:
         _pg_save_scan(domain, data)
         return
@@ -84,12 +97,17 @@ def save_scan(domain: str, data: Dict[str, Any]) -> None:
                     scan_count = scan_count + 1
             """, (domain, json.dumps(data, cls=_JSONEncoder)))
     except sqlite3.OperationalError as e:
-        # Soft fail — don't crash the scan if history can't be saved
         log.warning("Failed to save scan to database", extra={"domain": domain, "error": str(e)})
 
 
 def get_scan_history(domain: str) -> Dict[str, Any]:
     """Retrieve lightweight history metadata for a domain."""
+    try:
+        domain = sanitize_db_param(domain)
+    except SanitizationError as e:
+        log.warning("get_scan_history rejected unsafe domain", extra={"reason": e.reason})
+        return {"error": "Invalid domain parameter"}
+
     if _USE_POSTGRES:
         return _pg_get_history(domain)
 
@@ -114,6 +132,12 @@ def get_scan_history(domain: str) -> Dict[str, Any]:
 
 def get_scan_data(domain: str) -> Optional[Dict[str, Any]]:
     """Retrieve full scan data blob for the report endpoint."""
+    try:
+        domain = sanitize_db_param(domain)
+    except SanitizationError as e:
+        log.warning("get_scan_data rejected unsafe domain", extra={"reason": e.reason})
+        return None
+
     if _USE_POSTGRES:
         return _pg_get_scan_data(domain)
 
@@ -135,6 +159,7 @@ def get_all_history(limit: int = 50) -> List[Dict[str, Any]]:
 
     try:
         with _sqlite_conn() as conn:
+            # limit is an int from our own code — no user input, safe to interpolate
             cur = conn.execute(
                 "SELECT domain, timestamp, scan_count FROM scans ORDER BY timestamp DESC LIMIT ?",
                 (limit,)
@@ -221,7 +246,7 @@ def _pg_get_scan_data(domain: str) -> Optional[Dict[str, Any]]:
         row = cur.fetchone()
         conn.close()
         if row:
-            return row[0]  # psycopg2 returns JSONB as dict
+            return row[0]
     except Exception as e:
         log.warning("PostgreSQL data retrieval failed", extra={"error": str(e)})
     return None
@@ -242,4 +267,3 @@ def _pg_get_all_history(limit: int) -> List[Dict[str, Any]]:
     except Exception as e:
         log.warning("PostgreSQL history list failed", extra={"error": str(e)})
         return []
- 
