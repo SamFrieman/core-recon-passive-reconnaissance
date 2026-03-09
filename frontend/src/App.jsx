@@ -1,1292 +1,999 @@
-import React, { useState } from 'react';
-import axios from 'axios';
-import { 
-  Search, Shield, Globe, Terminal, Activity, ShieldAlert, 
-  Cpu, Lock, Download, History, Fingerprint, Database,
-  AlertTriangle, CheckCircle, XCircle, Clock, Server,
-  Zap, Eye, MapPin, ChevronDown, ChevronUp, ExternalLink,
-  Info, TrendingUp, Layers, Code
-} from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from "react";
 
-const RiskGauge = ({ score, level }) => {
-  const getColor = (s) => {
-    if (s < 30) return 'bg-emerald-500';
-    if (s < 60) return 'bg-amber-500';
-    return 'bg-rose-500';
+/* ─── Google Font: JetBrains Mono + Syne ───────────────────────────────── */
+const fontLink = document.createElement("link");
+fontLink.rel = "stylesheet";
+fontLink.href = "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@400;600;800&display=swap";
+document.head.appendChild(fontLink);
+
+/* ─── CSS variables + global reset ─────────────────────────────────────── */
+const injectStyles = () => {
+  const style = document.createElement("style");
+  style.textContent = `
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0b0c0e;
+      --bg2:       #111316;
+      --bg3:       #181b1f;
+      --border:    #242830;
+      --border2:   #2e3340;
+      --amber:     #f5a623;
+      --amber-dim: #8a5d12;
+      --green:     #39d98a;
+      --green-dim: #1a6640;
+      --red:       #ff4f4f;
+      --red-dim:   #6b1c1c;
+      --blue:      #5b8dee;
+      --blue-dim:  #1e3266;
+      --text:      #d4d8e1;
+      --text-dim:  #5c6270;
+      --text-mid:  #8a909e;
+      --mono:      'JetBrains Mono', monospace;
+      --display:   'Syne', sans-serif;
+    }
+
+    html, body, #root {
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 13px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    ::selection { background: var(--amber-dim); color: var(--amber); }
+
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+    /* Scan progress node pulse */
+    @keyframes nodePulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(245,166,35,0.6); }
+      50%       { box-shadow: 0 0 0 6px rgba(245,166,35,0); }
+    }
+    @keyframes scanline {
+      0%   { transform: translateY(-100%); opacity: 0.04; }
+      100% { transform: translateY(100vh); opacity: 0.04; }
+    }
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes blink {
+      0%, 49% { opacity: 1; }
+      50%,100% { opacity: 0; }
+    }
+    @keyframes progressFill {
+      from { width: 0%; }
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .fade-up {
+      animation: fadeUp 0.35s ease both;
+    }
+
+    .panel {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+    }
+
+    .panel-header .label { color: var(--text-mid); }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 1px 6px;
+      border-radius: 2px;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .badge-ok       { background: #0d2d1c; color: var(--green);  border: 1px solid var(--green-dim); }
+    .badge-timeout  { background: #2d1a0d; color: var(--amber);  border: 1px solid var(--amber-dim); }
+    .badge-fail     { background: var(--red-dim); color: var(--red);    border: 1px solid #8b2020; }
+    .badge-miss     { background: #1a1c22; color: var(--text-dim); border: 1px solid var(--border2); }
+    .badge-scanning { background: #1a1c22; color: var(--amber);  border: 1px solid var(--amber-dim);
+                      animation: nodePulse 1.4s ease-in-out infinite; }
+
+    .risk-critical { color: var(--red); }
+    .risk-high     { color: #ff8c42; }
+    .risk-medium   { color: var(--amber); }
+    .risk-low      { color: var(--blue); }
+    .risk-minimal  { color: var(--green); }
+
+    .dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .dot-green  { background: var(--green); }
+    .dot-amber  { background: var(--amber); }
+    .dot-red    { background: var(--red); }
+    .dot-dim    { background: var(--text-dim); }
+    .dot-blue   { background: var(--blue); }
+  `;
+  document.head.appendChild(style);
+};
+injectStyles();
+
+/* ─── Helpers ───────────────────────────────────────────────────────────── */
+const API = "http://localhost:8000";
+
+function riskClass(level) {
+  return {
+    CRITICAL: "risk-critical",
+    HIGH:     "risk-high",
+    MEDIUM:   "risk-medium",
+    LOW:      "risk-low",
+    MINIMAL:  "risk-minimal",
+  }[level] ?? "risk-medium";
+}
+
+function riskDotClass(level) {
+  return {
+    CRITICAL: "dot dot-red",
+    HIGH:     "dot dot-red",
+    MEDIUM:   "dot dot-amber",
+    LOW:      "dot dot-blue",
+    MINIMAL:  "dot dot-green",
+  }[level] ?? "dot dot-dim";
+}
+
+function moduleStatusBadge(status) {
+  const map = {
+    OK:          ["OK", "badge badge-ok"],
+    SOFT_FAIL:   ["FAIL", "badge badge-fail"],
+    TIMEOUT:     ["TIMEOUT", "badge badge-timeout"],
+    UNAVAILABLE: ["N/A", "badge badge-miss"],
   };
+  const [label, cls] = map[status] ?? ["...", "badge badge-scanning"];
+  return <span className={cls}>{label}</span>;
+}
 
-  const getLevelColor = (l) => {
-    if (l === 'MINIMAL' || l === 'LOW') return 'text-emerald-400';
-    if (l === 'MEDIUM') return 'text-amber-400';
-    return 'text-rose-400';
-  };
+function scoreGrade(score) {
+  if (score >= 85) return "A";
+  if (score >= 70) return "B";
+  if (score >= 55) return "C";
+  if (score >= 35) return "D";
+  return "F";
+}
 
-  const getRingColor = (l) => {
-    if (l === 'MINIMAL' || l === 'LOW') return 'stroke-emerald-500';
-    if (l === 'MEDIUM') return 'stroke-amber-500';
-    return 'stroke-rose-500';
-  };
+/* ─── Sub-components (all defined outside App to prevent re-mount) ──────── */
 
-  // Calculate circumference for the circular progress
-  const radius = 45;
-  const circumference = 2 * Math.PI * radius;
-  const offset = circumference - (score / 100) * circumference;
+/* Scan progress pipeline */
+function ModulePipeline({ moduleStatus, moduleTimings, scanning }) {
+  const modules = [
+    { key: "infrastructure", label: "INFRA" },
+    { key: "dns",            label: "DNS" },
+    { key: "fingerprint",    label: "HTTP" },
+    { key: "ssl_certificate",label: "TLS" },
+    { key: "subdomains",     label: "SUBS" },
+    { key: "wayback",        label: "WBK" },
+    { key: "whois",          label: "WHOIS" },
+    { key: "technology",     label: "TECH" },
+  ];
 
   return (
-    <div className="flex items-center gap-6">
-      {/* Circular gauge */}
-      <div className="relative w-32 h-32">
-        <svg className="transform -rotate-90 w-32 h-32">
-          {/* Background circle */}
-          <circle
-            cx="64"
-            cy="64"
-            r={radius}
-            stroke="currentColor"
-            strokeWidth="8"
-            fill="none"
-            className="text-gray-800"
-          />
-          {/* Progress circle */}
-          <circle
-            cx="64"
-            cy="64"
-            r={radius}
-            stroke="currentColor"
-            strokeWidth="8"
-            fill="none"
-            className={getRingColor(level)}
-            strokeDasharray={circumference}
-            strokeDashoffset={offset}
-            strokeLinecap="round"
-            style={{ transition: 'stroke-dashoffset 1s ease-in-out' }}
-          />
-        </svg>
-        <div className="absolute inset-0 flex items-center justify-center flex-col">
-          <span className={`text-3xl font-black ${getLevelColor(level)}`}>{score}</span>
-          <span className="text-xs text-gray-500">/ 100</span>
-        </div>
-      </div>
+    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", padding: "12px 14px" }}>
+      {modules.map(({ key, label }) => {
+        const status = moduleStatus?.[key]?.status;
+        const timing = moduleTimings?.[key];
+        const isActive = scanning && !status;
 
-      {/* Risk details */}
-      <div className="flex-1">
-        <div className="text-sm text-gray-500 uppercase tracking-wider mb-1">Threat Level</div>
-        <div className={`text-2xl font-black ${getLevelColor(level)} mb-2`}>{level}</div>
-        <div className="h-2 w-full bg-gray-800/50 rounded-full overflow-hidden">
-          <div 
-            className={`h-full transition-all duration-1000 ${getColor(score)}`} 
-            style={{ width: `${score}%` }}
-          />
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const ExpandableCard = ({ title, icon: Icon, data, loading, defaultExpanded = false, renderContent }) => {
-  const [isExpanded, setIsExpanded] = useState(defaultExpanded);
-  
-  // Determine if card has valid data
-  const hasData = data && (!data.error || Object.keys(data).length > 1);
-  const hasError = data?.error;
-
-  return (
-    <div className={`bg-gradient-to-br from-gray-900/50 to-gray-900/30 border rounded-xl transition-all duration-300 overflow-hidden ${
-      isExpanded ? 'border-cyan-500/50 shadow-lg shadow-cyan-500/10' : 'border-gray-800/50 hover:border-gray-700/50'
-    }`}>
-      {/* Card Header - Always visible */}
-      <button
-        onClick={() => setIsExpanded(!isExpanded)}
-        className="w-full p-5 flex items-center justify-between group hover:bg-gray-800/20 transition-colors"
-      >
-        <div className="flex items-center gap-3">
-          {Icon && (
-            <div className={`p-2 rounded-lg transition-all ${
-              isExpanded 
-                ? 'bg-cyan-500/20 text-cyan-400' 
-                : 'bg-gray-800/50 text-gray-500 group-hover:bg-gray-800 group-hover:text-cyan-500'
-            }`}>
-              <Icon className="w-5 h-5" />
+        return (
+          <div key={key} style={{
+            display: "flex", flexDirection: "column", alignItems: "center",
+            gap: 4, minWidth: 52,
+          }}>
+            <div style={{
+              width: 48, height: 48,
+              background: isActive ? "#1a1c22" : (status === "OK" ? "#0d2d1c" : status ? "#1a1c22" : "#111316"),
+              border: `1px solid ${isActive ? "var(--amber-dim)" : status === "OK" ? "var(--green-dim)" : status === "SOFT_FAIL" ? "#6b1c1c" : status === "TIMEOUT" ? "var(--amber-dim)" : "var(--border)"}`,
+              borderRadius: 2,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              animation: isActive ? "nodePulse 1.4s ease-in-out infinite" : "none",
+              transition: "all 0.3s ease",
+            }}>
+              {status === "OK" && (
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M3 8l4 4 6-6" stroke="var(--green)" strokeWidth="1.5" strokeLinecap="round"/>
+                </svg>
+              )}
+              {(status === "SOFT_FAIL" || status === "TIMEOUT") && (
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M4 4l8 8M12 4l-8 8" stroke={status === "TIMEOUT" ? "var(--amber)" : "var(--red)"} strokeWidth="1.5" strokeLinecap="round"/>
+                </svg>
+              )}
+              {status === "UNAVAILABLE" && (
+                <span style={{ color: "var(--text-dim)", fontSize: 14, fontWeight: 700 }}>—</span>
+              )}
+              {isActive && (
+                <div style={{
+                  width: 16, height: 16, border: "2px solid transparent",
+                  borderTopColor: "var(--amber)", borderRadius: "50%",
+                  animation: "spin 0.8s linear infinite",
+                }} />
+              )}
             </div>
-          )}
-          <div className="text-left">
-            <h3 className="text-sm font-bold tracking-wider text-gray-300 uppercase">{title}</h3>
-            {!isExpanded && hasData && (
-              <p className="text-xs text-gray-600 mt-0.5">Click to expand</p>
-            )}
-          </div>
-        </div>
-
-        <div className="flex items-center gap-3">
-          {/* Status indicator */}
-          {loading ? (
-            <div className="w-2 h-2 bg-cyan-500 rounded-full animate-ping" />
-          ) : hasError ? (
-            <div className="flex items-center gap-2 text-rose-500 text-xs">
-              <XCircle className="w-4 h-4" />
-            </div>
-          ) : hasData ? (
-            <div className="flex items-center gap-2 text-emerald-500 text-xs">
-              <CheckCircle className="w-4 h-4" />
-            </div>
-          ) : (
-            <Info className="w-4 h-4 text-gray-600" />
-          )}
-          
-          {/* Expand/collapse icon - separated for better visibility */}
-          <div className={`p-1 rounded transition-colors ${
-            isExpanded ? 'bg-cyan-500/20' : 'group-hover:bg-gray-800/50'
-          }`}>
-            {isExpanded ? (
-              <ChevronUp className="w-5 h-5 text-cyan-500" />
-            ) : (
-              <ChevronDown className="w-5 h-5 text-gray-500 group-hover:text-cyan-500 transition-colors" />
-            )}
-          </div>
-        </div>
-      </button>
-
-      {/* Card Content - Expandable */}
-      {isExpanded && (
-        <div className="px-5 pb-5 animate-in slide-in-from-top duration-300 border-t border-gray-800/30">
-          <div className="bg-black/40 rounded-lg p-4 border border-gray-800/50 mt-4">
-            {loading ? (
-              <div className="flex items-center justify-center py-8 text-gray-600">
-                <Activity className="w-6 h-6 animate-spin mr-2" />
-                <span className="text-sm">Gathering intelligence...</span>
-              </div>
-            ) : (
-              <div className="text-gray-300 text-sm">
-                {renderContent ? renderContent(data) : <pre className="text-xs overflow-auto">{JSON.stringify(data, null, 2)}</pre>}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
-
-export default function App() {
-  const [domain, setDomain] = useState('');
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [inputWarning, setInputWarning] = useState(null);
-
-  // Client-side input validation
-  const validateInput = (input) => {
-    if (!input || input.trim().length === 0) {
-      return { valid: false, error: 'Input cannot be empty' };
-    }
-
-    const trimmed = input.trim();
-
-    // Check length
-    if (trimmed.length > 255) {
-      return { valid: false, error: 'Input too long (max 255 characters)' };
-    }
-
-    // Check for dangerous patterns (XSS prevention)
-    const xssPatterns = [
-      /<script/i,
-      /javascript:/i,
-      /on\w+\s*=/i,
-      /<iframe/i,
-      /<object/i,
-      /<embed/i,
-    ];
-
-    for (const pattern of xssPatterns) {
-      if (pattern.test(trimmed)) {
-        return { valid: false, error: 'Invalid characters detected' };
-      }
-    }
-
-    // Check for SQL injection patterns
-    const sqlPatterns = [
-      /(\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|UNION)\b)/i,
-      /(--|;)/,
-      /(\bOR\b\s+\w+\s*=)/i,
-      /(\bAND\b\s+\w+\s*=)/i,
-    ];
-
-    for (const pattern of sqlPatterns) {
-      if (pattern.test(trimmed)) {
-        return { valid: false, error: 'Invalid input format' };
-      }
-    }
-
-    // Check if it's a hash (show warning)
-    if (/^[a-fA-F0-9]{32}$/.test(trimmed)) {
-      return { valid: false, error: 'MD5 hash detected. Please enter a domain, IP, or URL instead.' };
-    }
-    if (/^[a-fA-F0-9]{40}$/.test(trimmed)) {
-      return { valid: false, error: 'SHA1 hash detected. Please enter a domain, IP, or URL instead.' };
-    }
-    if (/^[a-fA-F0-9]{64}$/.test(trimmed)) {
-      return { valid: false, error: 'SHA256 hash detected. Please enter a domain, IP, or URL instead.' };
-    }
-
-    // Basic format validation
-    const validFormatRegex = /^[a-zA-Z0-9\.\-\:\/]+$/;
-    if (!validFormatRegex.test(trimmed)) {
-      return { valid: false, error: 'Invalid characters. Use only letters, numbers, dots, hyphens, colons, and slashes.' };
-    }
-
-    return { valid: true, sanitized: trimmed };
-  };
-
-  const handleInputChange = (e) => {
-    const value = e.target.value;
-    setDomain(value);
-    
-    // Real-time validation feedback
-    if (value.trim().length > 0) {
-      const validation = validateInput(value);
-      if (!validation.valid) {
-        setInputWarning(validation.error);
-      } else {
-        setInputWarning(null);
-      }
-    } else {
-      setInputWarning(null);
-    }
-  };
-
-  const executeRecon = async () => {
-    // Validate input before sending
-    const validation = validateInput(domain);
-    
-    if (!validation.valid) {
-      setError(validation.error);
-      return;
-    }
-    
-    setLoading(true);
-    setError(null);
-    setData(null);
-    setInputWarning(null);
-
-    try {
-      // Use the sanitized input in the URL path (not query params)
-      const API_BASE = import.meta.env.VITE_API_URL || '/api';
-      const encodedDomain = encodeURIComponent(validation.sanitized);
-      const response = await axios.get(`${API_BASE}/v1/recon/${encodedDomain}`);
-      setData(response.data);
-    } catch (err) {
-      const errorMsg = err.response?.data?.detail || err.message || 'Failed to connect to reconnaissance service';
-      setError(errorMsg);
-    } finally {
-      setLoading(false);
-    }
- };
-
-  const handleKeyPress = (e) => {
-    if (e.key === 'Enter' && !loading) {
-      executeRecon();
-    }
-  };
-
-  // Render functions for different card types
-  const renderInfrastructure = (infra) => {
-    if (!infra || infra.error) {
-      return (
-        <div className="flex items-center gap-2 text-rose-400">
-          <AlertTriangle className="w-4 h-4" />
-          <span>{infra?.error || 'Unable to retrieve infrastructure data'}</span>
-        </div>
-      );
-    }
-
-    return (
-      <div className="space-y-4">
-        {/* Status badge */}
-        <div className="flex items-center gap-3 pb-3 border-b border-gray-800/50">
-          <div className={`w-3 h-3 rounded-full ${infra.status === 'ONLINE' ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`} />
-          <span className="text-sm font-bold text-gray-300">{infra.status}</span>
-          {infra.status === 'ONLINE' && (
-            <span className="text-xs text-emerald-500 ml-auto">● Live</span>
-          )}
-        </div>
-
-        {/* Network details */}
-        <div className="grid gap-3">
-          <div className="flex justify-between items-center">
-            <span className="text-gray-500 text-xs">IP Address</span>
-            <code className="text-cyan-400 font-mono text-sm bg-gray-900/50 px-2 py-1 rounded">{infra.ip}</code>
-          </div>
-
-          {infra.reverse_dns && infra.reverse_dns !== 'No PTR record' && (
-            <div className="flex justify-between items-start">
-              <span className="text-gray-500 text-xs">Reverse DNS</span>
-              <code className="text-cyan-400 font-mono text-xs text-right max-w-[60%] break-all">{infra.reverse_dns}</code>
-            </div>
-          )}
-
-          {infra.asn && (
-            <>
-              <div className="flex justify-between items-center">
-                <span className="text-gray-500 text-xs">ASN</span>
-                <code className="text-cyan-400 font-mono text-sm">{infra.asn.number}</code>
-              </div>
-              <div className="flex justify-between items-start">
-                <span className="text-gray-500 text-xs">Organization</span>
-                <span className="text-gray-300 text-xs text-right max-w-[60%]">{infra.asn.organization}</span>
-              </div>
-            </>
-          )}
-
-          <div className="flex justify-between items-start">
-            <span className="text-gray-500 text-xs">ISP Provider</span>
-            <span className="text-gray-300 text-xs text-right max-w-[60%]">{infra.provider}</span>
-          </div>
-
-          {infra.location && typeof infra.location === 'object' && (
-            <div className="mt-2 pt-3 border-t border-gray-800/50">
-              <div className="flex items-start gap-2 mb-2">
-                <MapPin className="w-4 h-4 text-cyan-500 mt-0.5" />
-                <div className="flex-1">
-                  <div className="text-gray-300 text-sm font-medium">
-                    {infra.location.city}, {infra.location.region}
-                  </div>
-                  <div className="text-gray-500 text-xs">{infra.location.country}</div>
-                  {infra.location.coordinates && (
-                    <code className="text-gray-600 text-xs mt-1 block">{infra.location.coordinates}</code>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  };
-
-  const renderFingerprint = (fing) => {
-    if (!fing || fing.error) {
-      return (
-        <div className="flex items-center gap-2 text-rose-400">
-          <AlertTriangle className="w-4 h-4" />
-          <span>{fing?.error || 'Unable to fingerprint system'}</span>
-        </div>
-      );
-    }
-
-    return (
-      <div className="space-y-4">
-        {/* Basic info */}
-        <div className="grid gap-3 pb-3 border-b border-gray-800/50">
-          <div className="flex justify-between items-center">
-            <span className="text-gray-500 text-xs">Server</span>
-            <code className="text-cyan-400 text-xs">{fing.server || 'Hidden'}</code>
-          </div>
-          <div className="flex justify-between items-center">
-            <span className="text-gray-500 text-xs">Protocol</span>
-            <span className={`text-xs font-bold px-2 py-1 rounded ${
-              fing.protocol === 'HTTPS' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'
-            }`}>
-              {fing.protocol}
+            <span style={{ fontSize: 9, color: isActive ? "var(--amber)" : status === "OK" ? "var(--green)" : "var(--text-dim)", letterSpacing: "0.06em", fontWeight: 600 }}>
+              {label}
             </span>
+            {timing > 0 && (
+              <span style={{ fontSize: 8, color: "var(--text-dim)" }}>{timing}s</span>
+            )}
           </div>
-          {fing.status_code && (
-            <div className="flex justify-between items-center">
-              <span className="text-gray-500 text-xs">Status Code</span>
-              <code className="text-cyan-400 text-sm">{fing.status_code}</code>
-            </div>
-          )}
-        </div>
+        );
+      })}
+    </div>
+  );
+}
 
-        {/* Security headers */}
-        {fing.security && (
+/* Risk gauge — score=100 is best (green), score=0 is critical (red) */
+function RiskGauge({ score, level }) {
+  const pct = score; // higher = better = more fill
+  const trackColor = {
+    MINIMAL:  "var(--green)",
+    LOW:      "var(--blue)",
+    MEDIUM:   "var(--amber)",
+    HIGH:     "#ff8c42",
+    CRITICAL: "var(--red)",
+  }[level] ?? "var(--amber)";
+
+  const grade = scoreGrade(score);
+
+  return (
+    <div style={{ padding: "14px", display: "flex", flexDirection: "column", gap: 10 }}>
+      {/* Grade + score row */}
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 10 }}>
+        <span style={{
+          fontFamily: "var(--display)", fontSize: 52, fontWeight: 800, lineHeight: 1,
+          color: trackColor, letterSpacing: "-0.04em",
+        }}>
+          {grade}
+        </span>
+        <div style={{ paddingBottom: 8 }}>
+          <div style={{ fontFamily: "var(--display)", fontSize: 28, fontWeight: 600, color: trackColor, lineHeight: 1 }}>
+            {score}
+          </div>
+          <div style={{ fontSize: 9, color: "var(--text-dim)", letterSpacing: "0.1em", marginTop: 2 }}>
+            /100 — {level}
+          </div>
+        </div>
+      </div>
+
+      {/* Bar — fill = score (100 = full green, 0 = empty critical) */}
+      <div style={{ position: "relative", height: 6, background: "var(--bg3)", borderRadius: 1, overflow: "hidden" }}>
+        <div style={{
+          position: "absolute", left: 0, top: 0, bottom: 0,
+          width: `${pct}%`, background: trackColor,
+          animation: "progressFill 0.8s cubic-bezier(0.4,0,0.2,1) both",
+          transition: "width 0.5s ease",
+        }} />
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 8, color: "var(--text-dim)" }}>
+        <span>CRITICAL</span>
+        <span>OPTIMAL</span>
+      </div>
+    </div>
+  );
+}
+
+/* Executive summary panel */
+function ExecutiveSummaryPanel({ summary }) {
+  if (!summary) return null;
+  const { security_posture, key_risks = [], infrastructure_observations = [], dns_security_assessment = [], subdomain_exposure, intelligence_highlights = [] } = summary;
+
+  return (
+    <div className="panel fade-up" style={{ animationDelay: "0.1s" }}>
+      <div className="panel-header">
+        <span style={{ color: "var(--amber)" }}>◈</span>
+        <span className="label">Executive Summary</span>
+      </div>
+      <div style={{ padding: "12px 14px", display: "flex", flexDirection: "column", gap: 14 }}>
+        {security_posture && (
+          <p style={{ color: "var(--text)", lineHeight: 1.7, fontSize: 12, borderLeft: "2px solid var(--amber)", paddingLeft: 10 }}>
+            {security_posture}
+          </p>
+        )}
+
+        {key_risks.length > 0 && (
           <div>
-            <div className="text-xs text-gray-500 uppercase tracking-wider mb-3">Security Headers</div>
-            <div className="space-y-2">
-              {Object.entries(fing.security).map(([header, value]) => {
-                const isSet = value !== 'MISSING' && value !== false;
-                return (
-                  <div key={header} className="flex items-center justify-between text-xs group">
-                    <span className="text-gray-400 flex-1">{header.replace(/-/g, ' ').toUpperCase()}</span>
-                    <div className={`flex items-center gap-2 ${isSet ? 'text-emerald-500' : 'text-rose-500'}`}>
-                      {isSet ? (
-                        <>
-                          <CheckCircle className="w-3 h-3" />
-                          <span className="font-medium">SET</span>
-                        </>
-                      ) : (
-                        <>
-                          <XCircle className="w-3 h-3" />
-                          <span className="font-medium">MISSING</span>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+            <div style={{ fontSize: 9, color: "var(--text-dim)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 6 }}>Key Risks</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {key_risks.map((r, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                  <span style={{
+                    fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 2,
+                    background: r.severity === "CRITICAL" ? "var(--red-dim)" : r.severity === "HIGH" ? "#2d1a0d" : "#1a1c22",
+                    color: r.severity === "CRITICAL" ? "var(--red)" : r.severity === "HIGH" ? "#ff8c42" : "var(--text-dim)",
+                    flexShrink: 0, marginTop: 1,
+                  }}>
+                    {r.severity}
+                  </span>
+                  <span style={{ color: "var(--text)", lineHeight: 1.5 }}>{r.finding}</span>
+                </div>
+              ))}
             </div>
           </div>
         )}
-      </div>
-    );
-  };
 
-  const renderSSL = (ssl) => {
-    if (!ssl || ssl.error) {
-      return (
-        <div className="flex items-center gap-2 text-rose-400">
-          <AlertTriangle className="w-4 h-4" />
-          <span>{ssl?.error || 'No SSL certificate found'}</span>
-        </div>
-      );
-    }
+        {infrastructure_observations.length > 0 && (
+          <div>
+            <div style={{ fontSize: 9, color: "var(--text-dim)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 6 }}>Infrastructure</div>
+            {infrastructure_observations.map((obs, i) => (
+              <div key={i} style={{ display: "flex", gap: 8, marginBottom: 3 }}>
+                <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>›</span>
+                <span style={{ color: "var(--text-mid)" }}>{obs}</span>
+              </div>
+            ))}
+          </div>
+        )}
 
-    const daysRemaining = ssl.days_remaining;
-    const isExpiringSoon = daysRemaining < 30;
-    const isExpired = daysRemaining < 0;
+        {dns_security_assessment.length > 0 && (
+          <div>
+            <div style={{ fontSize: 9, color: "var(--text-dim)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 6 }}>DNS / Email Auth</div>
+            {dns_security_assessment.map((item, i) => (
+              <div key={i} style={{ display: "flex", gap: 8, marginBottom: 3 }}>
+                <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>›</span>
+                <span style={{ color: "var(--text-mid)" }}>{item}</span>
+              </div>
+            ))}
+          </div>
+        )}
 
-    return (
-      <div className="space-y-4">
-        {/* Validity status */}
-        <div className="flex items-center justify-between pb-3 border-b border-gray-800/50">
-          <span className="text-gray-500 text-xs">Certificate Validity</span>
-          <div className={`flex items-center gap-2 ${
-            isExpired ? 'text-rose-500' : isExpiringSoon ? 'text-amber-500' : 'text-emerald-500'
-          }`}>
-            <Lock className="w-4 h-4" />
-            <span className="text-sm font-bold">
-              {isExpired ? 'EXPIRED' : `${daysRemaining} days`}
+        {subdomain_exposure && (
+          <div style={{ padding: "8px 10px", background: "var(--bg3)", border: "1px solid var(--border2)", borderRadius: 2 }}>
+            <span style={{ color: "var(--text-dim)", fontSize: 10 }}>
+              {subdomain_exposure.total_subdomains} subdomains discovered
+              {subdomain_exposure.high_risk_count > 0 && (
+                <span style={{ color: "var(--red)", marginLeft: 6 }}>
+                  — {subdomain_exposure.high_risk_count} high-risk
+                </span>
+              )}
             </span>
           </div>
-        </div>
-
-        {/* Certificate details */}
-        <div className="space-y-3">
-          <div>
-            <div className="text-gray-500 text-xs mb-1">Issuer</div>
-            <code className="text-cyan-400 text-xs block break-all">{ssl.issuer}</code>
-          </div>
-
-          <div>
-            <div className="text-gray-500 text-xs mb-1">Subject</div>
-            <code className="text-cyan-400 text-xs block break-all">{ssl.subject}</code>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <div className="text-gray-500 text-xs mb-1">Valid From</div>
-              <div className="text-gray-300 text-xs">{new Date(ssl.valid_from).toLocaleDateString()}</div>
-            </div>
-            <div>
-              <div className="text-gray-500 text-xs mb-1">Valid Until</div>
-              <div className="text-gray-300 text-xs">{new Date(ssl.valid_until).toLocaleDateString()}</div>
-            </div>
-          </div>
-
-          <div className="flex justify-between items-center">
-            <span className="text-gray-500 text-xs">TLS Version</span>
-            <code className="text-cyan-400 text-xs">{ssl.tls_version}</code>
-          </div>
-
-          {ssl.subject_alternative_names && ssl.subject_alternative_names.length > 0 && (
-            <div className="mt-3 pt-3 border-t border-gray-800/50">
-              <div className="text-gray-500 text-xs mb-2">
-                Subject Alternative Names ({ssl.subject_alternative_names.length})
-              </div>
-              <div className="space-y-1 max-h-32 overflow-auto">
-                {ssl.subject_alternative_names.map((san, i) => (
-                  <div key={i} className="text-cyan-400 text-xs font-mono flex items-center gap-2">
-                    <span className="text-gray-700">→</span>
-                    {san}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
+        )}
       </div>
-    );
-  };
+    </div>
+  );
+}
 
-  const renderDNS = (dns) => {
-    if (!dns || Object.keys(dns).length === 0) {
-      return <div className="text-gray-500 text-sm">No DNS records retrieved</div>;
-    }
-
-    const recordTypes = Object.entries(dns).filter(([_, records]) => 
-      records && Array.isArray(records) && records.length > 0 && 
-      !records[0].includes('Query failed') && !records[0].includes('timeout')
-    );
-
-    if (recordTypes.length === 0) {
-      return <div className="text-gray-500 text-sm">No valid DNS records found</div>;
-    }
-
-    return (
-      <div className="space-y-4">
-        {recordTypes.map(([recordType, records]) => (
-          <div key={recordType} className="pb-3 border-b border-gray-800/50 last:border-0">
-            <div className="text-cyan-500 text-xs uppercase font-bold mb-2 flex items-center gap-2">
-              <Layers className="w-3 h-3" />
-              {recordType} Records
-            </div>
-            <div className="space-y-1 ml-4">
-              {records.slice(0, 10).map((record, i) => (
-                <div key={i} className="text-gray-400 text-xs font-mono flex items-start gap-2">
-                  <span className="text-gray-700 mt-0.5">→</span>
-                  <span className="break-all">{record}</span>
-                </div>
-              ))}
-              {records.length > 10 && (
-                <div className="text-gray-600 text-xs italic mt-2">
-                  + {records.length - 10} more records
+/* Intelligence correlations */
+function CorrelationsPanel({ correlations = [] }) {
+  if (!correlations.length) return null;
+  return (
+    <div className="panel fade-up" style={{ animationDelay: "0.15s" }}>
+      <div className="panel-header">
+        <span style={{ color: "var(--blue)" }}>⊛</span>
+        <span className="label">Intelligence Correlations</span>
+        <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--text-dim)" }}>{correlations.length}</span>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column" }}>
+        {correlations.map((c, i) => (
+          <div key={i} style={{
+            padding: "10px 14px",
+            borderBottom: i < correlations.length - 1 ? "1px solid var(--border)" : "none",
+            display: "flex", gap: 10, alignItems: "flex-start",
+          }}>
+            <span style={{
+              fontSize: 9, fontWeight: 700, padding: "2px 6px", borderRadius: 2, flexShrink: 0,
+              background: c.severity === "CRITICAL" ? "var(--red-dim)" : c.severity === "HIGH" ? "#2d1a0d" : "#1a1c22",
+              color: c.severity === "CRITICAL" ? "var(--red)" : c.severity === "HIGH" ? "#ff8c42" : "var(--text-dim)",
+              marginTop: 1,
+            }}>
+              {c.severity ?? "INFO"}
+            </span>
+            <div style={{ flex: 1 }}>
+              {c.correlation_type && (
+                <div style={{ fontSize: 9, color: "var(--text-dim)", letterSpacing: "0.08em", marginBottom: 2, textTransform: "uppercase" }}>
+                  {c.correlation_type}
                 </div>
               )}
+              <div style={{ color: "var(--text)", lineHeight: 1.5, fontSize: 12 }}>{c.description}</div>
             </div>
           </div>
         ))}
       </div>
-    );
-  };
+    </div>
+  );
+}
 
-  const renderSubdomains = (subs) => {
-    console.log("Subdomain data received:", subs); // Debug log
-    
-    if (!subs) {
-      return <div className="text-gray-500 text-sm">No subdomain data received</div>;
-    }
-    
-    if (subs.error) {
-      return (
-        <div className="flex items-center gap-2 text-amber-400">
-          <AlertTriangle className="w-4 h-4" />
-          <span className="text-sm">{subs.error}</span>
-        </div>
-      );
-    }
-    
-    if (!subs.subdomains || subs.subdomains.length === 0) {
-      return (
-        <div className="text-center py-6">
-          <Terminal className="w-8 h-8 mx-auto mb-2 opacity-20 text-gray-600" />
-          <div className="text-gray-500 text-sm">No subdomains discovered</div>
-          <div className="text-gray-600 text-xs mt-2">
-            This could mean the domain has no public subdomains or they are not indexed in certificate transparency logs
-          </div>
-        </div>
-      );
-    }
+/* Exposed assets */
+function ExposedAssetsPanel({ assets = [], summary }) {
+  if (!assets.length) return null;
+  const sevOrder = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, MINIMAL: 4 };
+  const sorted = [...assets].sort((a, b) => (sevOrder[a.severity] ?? 5) - (sevOrder[b.severity] ?? 5));
 
-    return (
-      <SubdomainList subdomains={subs.subdomains} count={subs.count} sources={subs.sources} />
-    );
-  };
-
-  // Separate component for subdomain list to avoid state issues
-  const SubdomainList = ({ subdomains, count, sources }) => {
-    const [showAll, setShowAll] = useState(false);
-    const displayLimit = 15;
-    const displaySubdomains = showAll ? subdomains : subdomains.slice(0, displayLimit);
-
-    return (
-      <div className="space-y-4">
-        {/* Summary */}
-        <div className="flex items-center justify-between pb-3 border-b border-gray-800/50">
-          <div className="flex items-center gap-2">
-            <Terminal className="w-4 h-4 text-cyan-500" />
-            <span className="text-sm text-gray-400">Total Discovered</span>
-          </div>
-          <span className="text-xl font-bold text-cyan-400">{count || 0}</span>
-        </div>
-
-        {sources && (
-          <div className="text-xs text-gray-600">
-            <span className="text-gray-500">Sources:</span> {sources.join(', ')}
-          </div>
-        )}
-
-        {/* Subdomain list */}
-        <div className="space-y-1 max-h-96 overflow-auto">
-          {displaySubdomains.map((sub, i) => (
-            <div key={i} className="group flex items-center gap-2 text-xs font-mono hover:bg-gray-800/30 p-2 rounded transition-colors">
-              <span className="text-gray-700">{(showAll ? i : i) + 1}.</span>
-              <span className="text-cyan-400 group-hover:text-cyan-300 break-all">{sub}</span>
-              <a 
-                href={`https://${sub}`} 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="ml-auto"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <ExternalLink className="w-3 h-3 text-gray-700 group-hover:text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
-              </a>
-            </div>
-          ))}
-        </div>
-
-        {/* Show more button */}
-        {subdomains.length > displayLimit && (
-          <button 
-            onClick={() => {
-              const API_BASE = import.meta.env.VITE_API_URL || '/api';
-              const encodedDomain = encodeURIComponent(data.target);
-              window.open(`${API_BASE}/v1/report/${encodedDomain}`, '_blank');
-            }}
-            className="bg-gradient-to-r from-cyan-600 to-cyan-500 hover:from-cyan-500 hover:to-cyan-400 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-cyan-500/20"
-          >
-            <Download className="w-5 h-5" />
-            <span>Download Report</span>
-          </button>
-        )}
+  return (
+    <div className="panel fade-up" style={{ animationDelay: "0.2s" }}>
+      <div className="panel-header">
+        <span style={{ color: "var(--red)" }}>◉</span>
+        <span className="label">Exposed Assets</span>
+        <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--red)" }}>{assets.length}</span>
       </div>
-    );
-  };
-
-  const renderWHOIS = (whois) => {
-    if (!whois || whois.error) {
-      return (
-        <div className="flex items-center gap-2 text-amber-400">
-          <Info className="w-4 h-4" />
-          <span className="text-sm">{whois?.note || 'WHOIS data unavailable (likely privacy protected)'}</span>
+      {summary && (
+        <div style={{
+          padding: "8px 14px", borderBottom: "1px solid var(--border)",
+          display: "flex", gap: 16, fontSize: 10, color: "var(--text-dim)",
+        }}>
+          {summary.critical_count > 0 && <span style={{ color: "var(--red)" }}>{summary.critical_count} CRITICAL</span>}
+          {summary.high_count > 0 && <span style={{ color: "#ff8c42" }}>{summary.high_count} HIGH</span>}
+          {summary.medium_count > 0 && <span style={{ color: "var(--amber)" }}>{summary.medium_count} MEDIUM</span>}
         </div>
-      );
-    }
-
-    return (
-      <div className="space-y-3">
-        <div className="flex justify-between items-start">
-          <span className="text-gray-500 text-xs">Registrar</span>
-          <span className="text-gray-300 text-xs text-right max-w-[60%]">{whois.registrar}</span>
-        </div>
-        <div className="flex justify-between items-center">
-          <span className="text-gray-500 text-xs">Organization</span>
-          <span className="text-gray-300 text-xs">{whois.organization}</span>
-        </div>
-        <div className="grid grid-cols-2 gap-3 pt-2 border-t border-gray-800/50">
-          <div>
-            <div className="text-gray-500 text-xs mb-1">Created</div>
-            <div className="text-gray-300 text-xs">
-              {whois.creation_date !== 'Unknown' ? new Date(whois.creation_date).toLocaleDateString() : 'Unknown'}
+      )}
+      <div style={{ maxHeight: 240, overflowY: "auto" }}>
+        {sorted.slice(0, 20).map((asset, i) => (
+          <div key={i} style={{
+            padding: "8px 14px",
+            borderBottom: "1px solid var(--border)",
+            display: "flex", gap: 10, alignItems: "center",
+          }}>
+            <div className={riskDotClass(asset.severity)} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {asset.hostname}
+              </div>
+              {asset.risk_reason && (
+                <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 1 }}>{asset.risk_reason}</div>
+              )}
             </div>
+            <span style={{
+              fontSize: 9, fontWeight: 700, padding: "1px 5px",
+              background: "var(--bg3)", borderRadius: 2, color: asset.severity === "CRITICAL" ? "var(--red)" : asset.severity === "HIGH" ? "#ff8c42" : "var(--text-dim)",
+              flexShrink: 0,
+            }}>
+              {asset.exposure_type ?? asset.severity}
+            </span>
           </div>
-          <div>
-            <div className="text-gray-500 text-xs mb-1">Expires</div>
-            <div className="text-gray-300 text-xs">
-              {whois.expiration_date !== 'Unknown' ? new Date(whois.expiration_date).toLocaleDateString() : 'Unknown'}
-            </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* Subdomains list */
+function SubdomainList({ subdomains }) {
+  const list = subdomains?.subdomains ?? [];
+  if (!list.length) return null;
+  return (
+    <div className="panel fade-up">
+      <div className="panel-header">
+        <span style={{ color: "var(--text-dim)" }}>⊞</span>
+        <span className="label">Subdomains</span>
+        <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--text-dim)" }}>{list.length}</span>
+      </div>
+      <div style={{ maxHeight: 200, overflowY: "auto" }}>
+        {list.map((sub, i) => (
+          <div key={i} style={{
+            padding: "5px 14px", borderBottom: "1px solid var(--border)",
+            display: "flex", gap: 8, alignItems: "center", fontSize: 11,
+          }}>
+            <span style={{ color: "var(--text-dim)" }}>›</span>
+            <span style={{ color: "var(--text)" }}>{sub}</span>
           </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* Technology stack */
+function TechnologyStack({ technology }) {
+  const stack = technology?.detected_technologies ?? [];
+  if (!stack.length) return null;
+  return (
+    <div className="panel fade-up">
+      <div className="panel-header">
+        <span style={{ color: "var(--text-dim)" }}>⬡</span>
+        <span className="label">Technology Stack</span>
+      </div>
+      <div style={{ padding: "10px 14px", display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {stack.map((tech, i) => (
+          <div key={i} style={{
+            padding: "3px 8px", background: "var(--bg3)",
+            border: "1px solid var(--border2)", borderRadius: 2,
+            fontSize: 11, color: "var(--text-mid)",
+          }}>
+            {tech.name ?? tech}
+            {tech.version && <span style={{ color: "var(--text-dim)", marginLeft: 4 }}>v{tech.version}</span>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* Recommendations */
+function RecommendationsPanel({ recommendations = [], riskIssues = [] }) {
+  if (!recommendations.length && !riskIssues.length) return null;
+  return (
+    <div className="panel fade-up">
+      <div className="panel-header">
+        <span style={{ color: "var(--green)" }}>▶</span>
+        <span className="label">Recommendations</span>
+      </div>
+      <div style={{ padding: "10px 14px", display: "flex", flexDirection: "column", gap: 6 }}>
+        {recommendations.map((rec, i) => (
+          <div key={i} style={{ display: "flex", gap: 8, padding: "6px 0", borderBottom: i < recommendations.length - 1 ? "1px solid var(--border)" : "none" }}>
+            <span style={{ color: "var(--green)", flexShrink: 0, marginTop: 1 }}>→</span>
+            <span style={{ color: "var(--text)", lineHeight: 1.5 }}>{rec}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* History panel */
+function HistoryPanel({ history = [], onSelect }) {
+  if (!history.length) return null;
+  return (
+    <div className="panel">
+      <div className="panel-header">
+        <span style={{ color: "var(--text-dim)" }}>◷</span>
+        <span className="label">Scan History</span>
+      </div>
+      <div style={{ maxHeight: 200, overflowY: "auto" }}>
+        {history.map((h, i) => (
+          <div key={i}
+            onClick={() => onSelect(h.domain ?? h.target)}
+            style={{
+              padding: "8px 14px", cursor: "pointer",
+              borderBottom: "1px solid var(--border)",
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              transition: "background 0.15s",
+            }}
+            onMouseEnter={e => e.currentTarget.style.background = "var(--bg3)"}
+            onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+          >
+            <span style={{ color: "var(--amber)", fontSize: 11 }}>{h.domain ?? h.target}</span>
+            <span style={{ color: "var(--text-dim)", fontSize: 10 }}>{h.timestamp}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* DNS details */
+function DnsPanel({ dns }) {
+  if (!dns || dns.error) return null;
+  const { spf, dmarc, dnssec, a_records = [], mx_records = [] } = dns;
+  return (
+    <div className="panel fade-up">
+      <div className="panel-header">
+        <span style={{ color: "var(--text-dim)" }}>⬡</span>
+        <span className="label">DNS Intelligence</span>
+      </div>
+      <div style={{ padding: "10px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+          <StatusItem label="SPF" ok={spf?.present} value={spf?.present ? "present" : "missing"} />
+          <StatusItem label="DMARC" ok={dmarc?.present && dmarc?.policy !== "none"} value={dmarc?.present ? `policy=${dmarc.policy}` : "missing"} />
+          <StatusItem label="DNSSEC" ok={dnssec?.enabled} value={dnssec?.enabled ? "enabled" : "disabled"} />
         </div>
-        {whois.name_servers && whois.name_servers.length > 0 && (
-          <div className="pt-2 border-t border-gray-800/50">
-            <div className="text-gray-500 text-xs mb-2">Name Servers</div>
-            <div className="space-y-1">
-              {whois.name_servers.slice(0, 4).map((ns, i) => (
-                <div key={i} className="text-cyan-400 font-mono text-xs flex items-center gap-2">
-                  <span className="text-gray-700">→</span>
-                  {ns}
-                </div>
+        {a_records.length > 0 && (
+          <div>
+            <div style={{ fontSize: 9, color: "var(--text-dim)", letterSpacing: "0.1em", marginBottom: 4, textTransform: "uppercase" }}>A Records</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+              {a_records.slice(0, 6).map((ip, i) => (
+                <span key={i} style={{ fontSize: 10, fontFamily: "var(--mono)", color: "var(--text-mid)", padding: "1px 6px", background: "var(--bg3)", border: "1px solid var(--border)" }}>
+                  {ip}
+                </span>
               ))}
             </div>
           </div>
         )}
       </div>
-    );
-  };
+    </div>
+  );
+}
 
-  const renderTechnology = (tech) => {
-    if (!tech || tech.error || tech.message) {
-      return (
-        <div className="text-center py-8 text-gray-600">
-          <Code className="w-8 h-8 mx-auto mb-2 opacity-20" />
-          <div className="text-sm">{tech?.message || tech?.error || 'No technologies detected'}</div>
-        </div>
-      );
-    }
+function StatusItem({ label, ok, value }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <div className={`dot ${ok ? "dot-green" : "dot-red"}`} />
+      <span style={{ fontSize: 10, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.08em" }}>{label}</span>
+      <span style={{ fontSize: 10, color: ok ? "var(--green)" : "var(--red)" }}>{value}</span>
+    </div>
+  );
+}
 
-    return <TechnologyStack technologies={tech} />;
-  };
-
-  // Separate component for technology stack
-  const TechnologyStack = ({ technologies }) => {
-    const [expandedCategories, setExpandedCategories] = useState({});
-
-    const totalTechs = Object.values(technologies).reduce(
-      (sum, items) => sum + items.length, 0
-    );
-
-    return (
-      <div className="space-y-3">
-        {/* Summary bar */}
-        <div className="flex items-center justify-between pb-3 border-b border-gray-800/50">
-          <div className="flex items-center gap-2">
-            <Cpu className="w-4 h-4 text-cyan-500" />
-            <span className="text-sm text-gray-400">Total Technologies Detected</span>
-          </div>
-          <span className="text-xl font-bold text-cyan-400">{totalTechs}</span>
-        </div>
-
-        {Object.entries(technologies).map(([category, items]) => {
-          const isExpanded = expandedCategories[category] !== false; // default expanded
-          
-          return (
-            <div key={category} className="border border-gray-800/50 rounded-lg overflow-hidden hover:border-gray-700/50 transition-colors">
-              <button
-                onClick={() => setExpandedCategories(prev => ({
-                  ...prev,
-                  [category]: !isExpanded
-                }))}
-                className="w-full bg-gray-900/30 px-4 py-3 flex items-center justify-between hover:bg-gray-900/50 transition-colors"
-              >
-                <div className="flex items-center gap-3">
-                  <Cpu className="w-4 h-4 text-cyan-500" />
-                  <span className="text-xs font-bold text-cyan-400 uppercase tracking-wider">
-                    {category}
-                  </span>
-                  <span className="text-xs text-gray-600 bg-gray-800/50 px-2 py-0.5 rounded">
-                    {items.length}
-                  </span>
-                </div>
-                {isExpanded ? (
-                  <ChevronUp className="w-4 h-4 text-gray-500" />
-                ) : (
-                  <ChevronDown className="w-4 h-4 text-gray-500" />
-                )}
-              </button>
-
-              {isExpanded && (
-                <div className="p-4 space-y-2 bg-black/20">
-                  {items.map((item, idx) => (
-                    <div key={idx} className="flex items-center justify-between group hover:bg-gray-900/30 p-2 rounded transition-colors">
-                      <div className="flex items-center gap-2">
-                        <div className="w-1.5 h-1.5 bg-cyan-500/50 rounded-full group-hover:bg-cyan-500 transition-colors" />
-                        <span className="text-sm text-gray-400 group-hover:text-gray-300 transition-colors">
-                          {item.name}
-                        </span>
-                      </div>
-                      {item.version && item.version !== 'Undetected' ? (
-                        <span className="text-xs font-mono px-2.5 py-1 rounded text-cyan-400 bg-cyan-500/10 border border-cyan-500/20">
-                          v{item.version}
-                        </span>
-                      ) : (
-                        <span className="text-xs font-mono px-2.5 py-1 rounded text-gray-600 bg-gray-900/50 border border-gray-800">
-                          version unknown
-                        </span>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })}
+/* TLS/SSL panel */
+function TlsPanel({ ssl }) {
+  if (!ssl || ssl.error) return null;
+  const { grade, protocol, expires_in_days, issuer, san_count, issues = [] } = ssl;
+  return (
+    <div className="panel fade-up">
+      <div className="panel-header">
+        <span style={{ color: "var(--text-dim)" }}>🔒</span>
+        <span className="label">TLS Certificate</span>
+        {grade && (
+          <span style={{
+            marginLeft: "auto", fontFamily: "var(--display)", fontWeight: 700, fontSize: 16,
+            color: grade === "A" || grade === "A+" ? "var(--green)" : grade === "B" ? "var(--blue)" : grade === "C" ? "var(--amber)" : "var(--red)",
+          }}>
+            {grade}
+          </span>
+        )}
       </div>
-    );
-  };
-
-  const renderWayback = (wb) => {
-    console.log("Wayback data received:", wb); // Debug log
-    
-    if (!wb) {
-      return <div className="text-gray-500 text-sm">No archive data received</div>;
-    }
-    
-    if (wb.error) {
-      return (
-        <div className="flex items-center gap-2 text-amber-400">
-          <AlertTriangle className="w-4 h-4" />
-          <span className="text-sm">{wb.error}</span>
+      <div style={{ padding: "10px 14px", display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+          {protocol && <StatusItem label="Protocol" ok={protocol?.includes("1.3")} value={protocol} />}
+          {expires_in_days !== undefined && (
+            <StatusItem label="Expires" ok={expires_in_days > 30} value={`${expires_in_days}d`} />
+          )}
+          {san_count !== undefined && <StatusItem label="SANs" ok={true} value={san_count} />}
         </div>
-      );
-    }
-    
-    if (!wb.available) {
-      return (
-        <div className="text-center py-6">
-          <History className="w-8 h-8 mx-auto mb-2 opacity-20 text-gray-600" />
-          <div className="flex items-center justify-center gap-2 text-gray-500 text-sm">
-            <XCircle className="w-4 h-4" />
-            <span>{wb.message || 'No archives found in Wayback Machine'}</span>
+        {issuer && <div style={{ fontSize: 10, color: "var(--text-dim)" }}>Issuer: <span style={{ color: "var(--text-mid)" }}>{issuer}</span></div>}
+        {issues.length > 0 && (
+          <div style={{ marginTop: 4 }}>
+            {issues.map((iss, i) => (
+              <div key={i} style={{ fontSize: 10, color: "var(--red)", display: "flex", gap: 6 }}>
+                <span>!</span><span>{iss}</span>
+              </div>
+            ))}
           </div>
-          <div className="text-gray-600 text-xs mt-2">
-            This domain may be new or hasn't been archived yet
-          </div>
-        </div>
-      );
-    }
-
-    return (
-      <div className="space-y-4">
-        <div className="flex items-center gap-2 text-emerald-500 pb-3 border-b border-gray-800/50">
-          <CheckCircle className="w-5 h-5" />
-          <span className="text-sm font-bold">Archives Available</span>
-        </div>
-
-        <div className="space-y-3">
-          {wb.total_snapshots && (
-            <div className="flex justify-between items-center">
-              <span className="text-gray-500 text-xs">Total Snapshots</span>
-              <span className="text-cyan-400 text-xl font-bold">{wb.total_snapshots}</span>
-            </div>
-          )}
-
-          {wb.last_snapshot_formatted && (
-            <div className="flex justify-between items-center">
-              <span className="text-gray-500 text-xs">Last Capture</span>
-              <code className="text-gray-400 text-xs">{wb.last_snapshot_formatted}</code>
-            </div>
-          )}
-          
-          {!wb.last_snapshot_formatted && wb.last_snapshot && (
-            <div className="flex justify-between items-center">
-              <span className="text-gray-500 text-xs">Last Snapshot</span>
-              <code className="text-gray-400 text-xs">{wb.last_snapshot}</code>
-            </div>
-          )}
-
-          {wb.status_code && (
-            <div className="flex justify-between items-center">
-              <span className="text-gray-500 text-xs">Status Code</span>
-              <code className="text-cyan-400 text-xs">{wb.status_code}</code>
-            </div>
-          )}
-
-          {wb.archive_url && (
-            <a
-              href={wb.archive_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center justify-center gap-2 w-full py-3 mt-4 text-sm text-cyan-400 hover:text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 hover:border-cyan-500/50 rounded-lg transition-all"
-            >
-              <ExternalLink className="w-4 h-4" />
-              <span>View Latest Archive</span>
-            </a>
-          )}
-        </div>
+        )}
       </div>
-    );
+    </div>
+  );
+}
+
+/* ─── Main App ──────────────────────────────────────────────────────────── */
+export default function App() {
+  const [query, setQuery]           = useState("");
+  const [scanning, setScanning]     = useState(false);
+  const [data, setData]             = useState(null);
+  const [error, setError]           = useState(null);
+  const [history, setHistory]       = useState([]);
+  const [moduleStatus, setModuleStatus]   = useState(null);
+  const [moduleTimings, setModuleTimings] = useState(null);
+  const inputRef = useRef(null);
+
+  // Fetch history on mount
+  useEffect(() => {
+    fetch(`${API}/api/v1/history`)
+      .then(r => r.json())
+      .then(d => setHistory(Array.isArray(d) ? d : []))
+      .catch(() => {});
+  }, []);
+
+  const runScan = useCallback(async (target) => {
+    const q = (target ?? query).trim();
+    if (!q) return;
+
+    setScanning(true);
+    setData(null);
+    setError(null);
+    setModuleStatus(null);
+    setModuleTimings(null);
+
+    try {
+      const res = await fetch(`${API}/api/v1/recon/${encodeURIComponent(q)}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail ?? "Scan failed");
+      }
+      const json = await res.json();
+      setData(json);
+      setModuleStatus(json.module_status ?? null);
+      setModuleTimings(json.module_timings ?? null);
+
+      // Refresh history
+      fetch(`${API}/api/v1/history`)
+        .then(r => r.json())
+        .then(d => setHistory(Array.isArray(d) ? d : []))
+        .catch(() => {});
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setScanning(false);
+    }
+  }, [query]);
+
+  const handleKey = (e) => {
+    if (e.key === "Enter") runScan();
   };
+
+  const riskLevel = data?.risk_level ?? "MEDIUM";
+  const riskScore = data?.risk_score ?? 0;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 text-gray-100 p-4 md:p-12 font-sans">
-      {/* Animated background grid */}
-      <div className="fixed inset-0 bg-[linear-gradient(to_right,#1f1f1f_1px,transparent_1px),linear-gradient(to_bottom,#1f1f1f_1px,transparent_1px)] bg-[size:4rem_4rem] opacity-20" />
-      <div className="fixed inset-0 bg-gradient-to-t from-cyan-500/5 via-transparent to-transparent" />
-      
-      <div className="relative z-10">
-        {/* Header */}
-        <div className="max-w-7xl mx-auto mb-12">
-          <div className="flex flex-col md:flex-row items-center justify-between gap-6 p-6 bg-gradient-to-r from-gray-900/80 to-gray-900/40 backdrop-blur-sm border border-gray-800/50 rounded-2xl">
-            <div className="flex items-center gap-4">
-              <div className="p-4 bg-gradient-to-br from-cyan-500/20 to-cyan-600/10 rounded-xl border border-cyan-500/30 shadow-lg shadow-cyan-500/20">
-                <Shield className="text-cyan-400 w-10 h-10" />
-              </div>
-              <div>
-                <h1 className="text-4xl font-black tracking-tight">
-                  CORE<span className="text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-500">RECON</span>
-                </h1>
-                <p className="text-xs text-gray-500 tracking-[0.3em] uppercase mt-1">
-                  Advanced Passive Intelligence Platform
-                </p>
-              </div>
-            </div>
-            <div className="text-right">
-              <div className="text-xs text-gray-500 uppercase mb-1">System Status</div>
-              <div className="flex items-center gap-2">
-                <span className="relative flex h-3 w-3">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
-                </span>
-                <span className="text-sm font-bold text-emerald-400">OPERATIONAL</span>
-              </div>
-            </div>
-          </div>
+    <div style={{
+      minHeight: "100vh",
+      background: "var(--bg)",
+      display: "flex",
+      flexDirection: "column",
+    }}>
+      {/* Scanline overlay */}
+      <div style={{
+        position: "fixed", inset: 0, pointerEvents: "none", zIndex: 0, overflow: "hidden",
+      }}>
+        <div style={{
+          position: "absolute", left: 0, right: 0, height: 2,
+          background: "linear-gradient(180deg, transparent, rgba(245,166,35,0.08), transparent)",
+          animation: "scanline 8s linear infinite",
+        }} />
+      </div>
+
+      {/* Header */}
+      <header style={{
+        position: "sticky", top: 0, zIndex: 10,
+        borderBottom: "1px solid var(--border)",
+        background: "rgba(11,12,14,0.96)",
+        backdropFilter: "blur(8px)",
+        padding: "0 20px",
+        display: "flex", alignItems: "center", height: 52, gap: 16,
+      }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+          <span style={{ fontFamily: "var(--display)", fontSize: 18, fontWeight: 800, color: "var(--amber)", letterSpacing: "-0.02em" }}>
+            CORE
+          </span>
+          <span style={{ fontFamily: "var(--display)", fontSize: 18, fontWeight: 400, color: "var(--text)" }}>
+            RECON
+          </span>
+          <span style={{ fontSize: 9, color: "var(--text-dim)", letterSpacing: "0.1em", marginLeft: 4 }}>v2.2</span>
         </div>
 
-        {/* Search Input */}
-        <div className="max-w-4xl mx-auto mb-16">
-          <div className="relative flex gap-3 bg-gray-900/50 backdrop-blur-sm border border-gray-800/50 p-3 rounded-2xl focus-within:border-cyan-500/50 focus-within:shadow-lg focus-within:shadow-cyan-500/10 transition-all">
-            <div className="flex items-center justify-center pl-3">
-              <Search className="w-6 h-6 text-gray-600" />
-            </div>
-            <input 
-              type="text"
-              value={domain}
-              onChange={handleInputChange}
-              onKeyPress={handleKeyPress}
-              placeholder="Enter domain, URL, or IP address (e.g., example.com, https://example.com, 8.8.8.8)"
-              className="flex-1 bg-transparent py-4 px-2 focus:outline-none text-cyan-400 placeholder:text-gray-700 text-lg"
-              disabled={loading}
+        <div style={{ flex: 1, display: "flex", gap: 8, maxWidth: 520 }}>
+          <div style={{ flex: 1, position: "relative" }}>
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              onKeyDown={handleKey}
+              placeholder="target domain or IP…"
+              disabled={scanning}
+              style={{
+                width: "100%", padding: "7px 12px",
+                background: "var(--bg3)", border: "1px solid var(--border2)",
+                borderRadius: 2, color: "var(--text)", fontFamily: "var(--mono)",
+                fontSize: 12, outline: "none", transition: "border-color 0.2s",
+              }}
+              onFocus={e => e.target.style.borderColor = "var(--amber-dim)"}
+              onBlur={e => e.target.style.borderColor = "var(--border2)"}
             />
-            <button 
-              onClick={executeRecon}
-              disabled={loading || !domain.trim() || inputWarning}
-              className="bg-gradient-to-r from-cyan-600 to-cyan-500 hover:from-cyan-500 hover:to-cyan-400 text-white px-8 py-3 rounded-xl font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-3 shadow-lg shadow-cyan-500/20 min-w-[180px] justify-center"
-            >
-              {loading ? (
-                <>
-                  <Activity className="animate-spin w-5 h-5" />
-                  <span>Scanning...</span>
-                </>
-              ) : (
-                <>
-                  <Zap className="w-5 h-5" />
-                  <span>Begin Scan</span>
-                </>
-              )}
-            </button>
+            {scanning && (
+              <span style={{
+                position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)",
+                fontSize: 9, color: "var(--amber)", letterSpacing: "0.1em",
+                animation: "blink 1s step-start infinite",
+              }}>SCANNING</span>
+            )}
           </div>
-          
-          {/* Input Warning */}
-          {inputWarning && !error && (
-            <div className="mt-4 p-4 bg-amber-500/10 border border-amber-500/30 rounded-xl backdrop-blur-sm">
-              <div className="flex items-center gap-3">
-                <AlertTriangle className="w-5 h-5 text-amber-400" />
-                <div>
-                  <div className="text-sm font-bold text-amber-400">Input Validation Warning</div>
-                  <div className="text-xs text-amber-300/80 mt-1">{inputWarning}</div>
-                </div>
-              </div>
-            </div>
-          )}
-          
-          {/* Error Display */}
-          {error && (
-            <div className="mt-4 p-4 bg-rose-500/10 border border-rose-500/30 rounded-xl backdrop-blur-sm">
-              <div className="flex items-center gap-3">
-                <AlertTriangle className="w-5 h-5 text-rose-400" />
-                <div>
-                  <div className="text-sm font-bold text-rose-400">Reconnaissance Error</div>
-                  <div className="text-xs text-rose-300/80 mt-1">{error}</div>
-                </div>
-              </div>
-            </div>
-          )}
-          
-          {/* Input Format Help */}
-          {!data && !loading && !error && (
-            <div className="mt-4 p-4 bg-gray-900/50 border border-gray-800/50 rounded-xl backdrop-blur-sm">
-              <div className="text-xs text-gray-500">
-                <div className="font-bold text-gray-400 mb-2">Supported Input Formats:</div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <div className="flex items-start gap-2">
-                    <Globe className="w-4 h-4 text-cyan-500 mt-0.5 flex-shrink-0" />
-                    <div>
-                      <div className="text-gray-400 font-medium">Domain Names</div>
-                      <code className="text-gray-600 text-xs">example.com</code>
-                    </div>
-                  </div>
-                  <div className="flex items-start gap-2">
-                    <Server className="w-4 h-4 text-cyan-500 mt-0.5 flex-shrink-0" />
-                    <div>
-                      <div className="text-gray-400 font-medium">IP Addresses</div>
-                      <code className="text-gray-600 text-xs">8.8.8.8, 2001:4860:4860::8888</code>
-                    </div>
-                  </div>
-                  <div className="flex items-start gap-2">
-                    <ExternalLink className="w-4 h-4 text-cyan-500 mt-0.5 flex-shrink-0" />
-                    <div>
-                      <div className="text-gray-400 font-medium">URLs</div>
-                      <code className="text-gray-600 text-xs">https://example.com</code>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
+          <button
+            onClick={() => runScan()}
+            disabled={scanning || !query.trim()}
+            style={{
+              padding: "7px 16px",
+              background: scanning ? "var(--bg3)" : "var(--amber)",
+              border: "none", borderRadius: 2, cursor: scanning ? "not-allowed" : "pointer",
+              fontFamily: "var(--mono)", fontWeight: 700, fontSize: 11,
+              color: scanning ? "var(--text-dim)" : "#000",
+              letterSpacing: "0.08em", transition: "all 0.15s",
+            }}
+          >
+            {scanning ? "RUNNING" : "SCAN"}
+          </button>
         </div>
 
-        {/* Loading State */}
-        {loading && (
-          <div className="max-w-7xl mx-auto">
-            <div className="text-center py-20">
-              <div className="inline-flex items-center gap-4 text-cyan-400 mb-8">
-                <Activity className="w-12 h-12 animate-spin" />
-                <span className="text-2xl font-bold tracking-wider">Reconnaissance in Progress</span>
-              </div>
-              <p className="text-gray-500 text-sm mb-8">Gathering intelligence from multiple passive sources...</p>
-              
-              {/* Enhanced loading progress */}
-              <div className="max-w-2xl mx-auto space-y-4">
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
-                  {['DNS Analysis', 'Subdomain Discovery', 'Security Scan', 'Certificate Check'].map((task, i) => (
-                    <div key={i} className="p-3 bg-gray-900/50 border border-gray-800/50 rounded-lg">
-                      <div className="flex items-center gap-2 justify-center">
-                        <div className="w-2 h-2 bg-cyan-500 rounded-full animate-pulse" style={{ animationDelay: `${i * 200}ms` }} />
-                        <span className="text-gray-400">{task}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                
-                <div className="h-2 bg-gray-800/50 rounded-full overflow-hidden">
-                  <div className="h-full bg-gradient-to-r from-cyan-600 to-blue-500 animate-pulse" style={{ width: '70%' }} />
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Empty State */}
-        {!data && !loading && !error && (
-          <div className="max-w-7xl mx-auto">
-            <div className="border border-dashed border-gray-800/50 rounded-2xl py-24 text-center backdrop-blur-sm bg-gray-900/20">
-              <div className="inline-flex p-6 bg-gray-900/50 rounded-2xl border border-gray-800/50 mb-6">
-                <Cpu className="w-16 h-16 text-gray-700" />
-              </div>
-              <h2 className="text-2xl font-bold text-gray-400 mb-3">Awaiting Target Input</h2>
-              <p className="text-sm text-gray-600 mb-12">Enter a domain above to begin comprehensive passive reconnaissance</p>
-              
-              <div className="flex items-center justify-center gap-12 text-sm">
-                {[
-                  { icon: Shield, label: 'Security Analysis' },
-                  { icon: Globe, label: 'Infrastructure Intel' },
-                  { icon: Terminal, label: 'Subdomain Discovery' },
-                  { icon: Lock, label: 'Certificate Validation' }
-                ].map(({ icon: Icon, label }, i) => (
-                  <div key={i} className="flex flex-col items-center gap-3">
-                    <div className="p-3 bg-gray-900/50 rounded-lg border border-gray-800/30">
-                      <Icon className="w-6 h-6 text-gray-700" />
-                    </div>
-                    <span className="text-gray-600">{label}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Results */}
         {data && (
-          <div className="max-w-7xl mx-auto">
-            {/* Action Bar */}
-            <div className="flex flex-col md:flex-row items-center justify-between gap-4 mb-8 p-5 bg-gray-900/50 backdrop-blur-sm border border-gray-800/50 rounded-xl">
-              <div className="flex flex-wrap items-center gap-4 text-sm">
-                <div className="flex items-center gap-2 text-gray-500">
-                  <Clock className="w-4 h-4" />
-                  <span>Scanned: {data.timestamp}</span>
-                </div>
-                <div className="flex items-center gap-2 text-gray-500">
-                  <Eye className="w-4 h-4" />
-                  <span>Target: <span className="text-cyan-400 font-mono">{data.target}</span></span>
-                </div>
-                {data.input_type && (
-                  <div className="flex items-center gap-2">
-                    <span className={`text-xs px-3 py-1 rounded-full font-bold ${
-                      data.input_type === 'domain' ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30' :
-                      data.input_type === 'ipv4' || data.input_type === 'ipv6' ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30' :
-                      data.input_type === 'url' ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' :
-                      'bg-gray-500/20 text-gray-400 border border-gray-500/30'
-                    }`}>
-                      {data.input_type.toUpperCase()}
-                    </span>
-                  </div>
-                )}
-                {data.original_input && data.original_input !== data.target && (
-                  <div className="text-xs text-gray-600">
-                    (from: {data.original_input})
-                  </div>
-                )}
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{data.target}</span>
+            <a
+              href={`${API}/api/v1/report/${encodeURIComponent(data.target)}`}
+              target="_blank" rel="noopener noreferrer"
+              style={{
+                padding: "4px 10px", background: "var(--bg3)",
+                border: "1px solid var(--border2)", borderRadius: 2,
+                fontSize: 10, color: "var(--text-mid)", textDecoration: "none",
+                letterSpacing: "0.06em",
+              }}
+            >
+              ↓ PDF
+            </a>
+          </div>
+        )}
+      </header>
+
+      {/* Body */}
+      <main style={{ flex: 1, display: "flex", gap: 0, position: "relative", zIndex: 1 }}>
+
+        {/* Left sidebar */}
+        <aside style={{
+          width: 220, flexShrink: 0,
+          borderRight: "1px solid var(--border)",
+          padding: "14px 12px",
+          display: "flex", flexDirection: "column", gap: 12,
+          overflowY: "auto",
+        }}>
+          <HistoryPanel history={history} onSelect={(d) => { setQuery(d); runScan(d); }} />
+        </aside>
+
+        {/* Content */}
+        <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+
+          {/* Empty state */}
+          {!scanning && !data && !error && (
+            <div style={{
+              display: "flex", flexDirection: "column", alignItems: "center",
+              justifyContent: "center", height: "60vh", gap: 12, opacity: 0.4,
+            }}>
+              <div style={{ fontSize: 48, color: "var(--border2)" }}>◎</div>
+              <div style={{ fontFamily: "var(--display)", fontSize: 14, color: "var(--text-dim)", letterSpacing: "0.2em", textTransform: "uppercase" }}>
+                Enter a target to begin recon
               </div>
-          <button 
-            onClick={() => {
-              const API_BASE = import.meta.env.VITE_API_URL || '/api';
-              // Use the exact target from the scan data, not the original input
-              const targetDomain = data.target;
-              const encodedDomain = encodeURIComponent(targetDomain);
-              window.open(`${API_BASE}/v1/report/${encodedDomain}`, '_blank');
-            }}
-            className="bg-gradient-to-r from-cyan-600 to-cyan-500 hover:from-cyan-500 hover:to-cyan-400 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-cyan-500/20"
-          >
-            <Download className="w-5 h-5" />
-            <span>Download Report</span>
-          </button>
+              <div style={{ fontSize: 10, color: "var(--text-dim)" }}>domain · IP · URL</div>
             </div>
+          )}
 
-            {/* Risk Assessment - Always Expanded */}
-            <div className="mb-6 bg-gradient-to-br from-gray-900/80 to-gray-900/40 backdrop-blur-sm border border-gray-800/50 rounded-xl p-6 shadow-xl">
-              <div className="flex items-center gap-3 mb-6">
-                <div className="p-3 bg-gradient-to-br from-rose-500/20 to-rose-600/10 rounded-xl border border-rose-500/30">
-                  <ShieldAlert className="w-6 h-6 text-rose-400" />
+          {/* Error */}
+          {error && (
+            <div style={{
+              padding: "12px 16px",
+              background: "var(--red-dim)", border: "1px solid #6b1c1c",
+              borderRadius: 2, color: "var(--red)", marginBottom: 12,
+            }}>
+              ✕ {error}
+            </div>
+          )}
+
+          {/* Scan in progress */}
+          {scanning && (
+            <div className="panel fade-up" style={{ marginBottom: 12 }}>
+              <div className="panel-header">
+                <div style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--amber)", animation: "nodePulse 1.4s ease-in-out infinite" }} />
+                <span className="label">Scan in progress</span>
+                <span style={{ marginLeft: "auto", animation: "blink 1.2s step-start infinite", color: "var(--amber)", fontSize: 10 }}>
+                  {query}
+                </span>
+              </div>
+              <ModulePipeline moduleStatus={null} moduleTimings={null} scanning={true} />
+            </div>
+          )}
+
+          {/* Results */}
+          {data && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+
+              {/* Top row: risk gauge + module pipeline */}
+              <div style={{ display: "flex", gap: 12 }}>
+                <div className="panel fade-up" style={{ width: 200, flexShrink: 0 }}>
+                  <div className="panel-header">
+                    <span style={{ color: "var(--text-dim)" }}>◈</span>
+                    <span className="label">Risk Score</span>
+                  </div>
+                  <RiskGauge score={riskScore} level={riskLevel} />
+                  {data.scan_duration_seconds && (
+                    <div style={{ padding: "0 14px 10px", fontSize: 9, color: "var(--text-dim)" }}>
+                      Scan completed in {data.scan_duration_seconds}s
+                    </div>
+                  )}
                 </div>
-                <div>
-                  <h2 className="text-xl font-bold text-gray-300">Threat Assessment & Risk Analysis</h2>
-                  <p className="text-xs text-gray-600 mt-1">Comprehensive security evaluation based on passive reconnaissance</p>
+
+                <div className="panel fade-up" style={{ flex: 1 }}>
+                  <div className="panel-header">
+                    <span style={{ color: "var(--text-dim)" }}>⬡</span>
+                    <span className="label">Module Status</span>
+                  </div>
+                  <ModulePipeline
+                    moduleStatus={moduleStatus}
+                    moduleTimings={moduleTimings}
+                    scanning={false}
+                  />
                 </div>
               </div>
 
-              <div className="grid md:grid-cols-3 gap-8">
-                {/* Risk Score */}
-                <div className="space-y-6">
-                  <div>
-                    <RiskGauge score={data.risk_score || 0} level={data.risk_level || 'UNKNOWN'} />
-                    <p className="text-sm text-gray-400 italic leading-relaxed mt-4">{data.risk_status}</p>
-                    
-                    {/* Risk calculation note */}
-                    <div className="mt-3 p-3 bg-gray-900/50 border border-gray-800/50 rounded-lg">
-                      <div className="flex items-start gap-2">
-                        <Info className="w-4 h-4 text-cyan-500 flex-shrink-0 mt-0.5" />
-                        <div className="text-xs text-gray-500">
-                          <span className="text-gray-400 font-medium">Risk calculated based on:</span>
-                          <div className="mt-1 space-y-0.5 text-gray-600">
-                            • Security headers presence
-                            • SSL/TLS configuration
-                            • Server information disclosure
-                            • Protocol security (HTTP vs HTTPS)
-                          </div>
-                        </div>
-                      </div>
-                    </div>
+              {/* Risk status text */}
+              {data.risk_status && (
+                <div style={{
+                  padding: "10px 14px",
+                  background: "var(--bg2)", border: "1px solid var(--border)",
+                  borderLeft: `3px solid ${riskLevel === "CRITICAL" ? "var(--red)" : riskLevel === "HIGH" ? "#ff8c42" : riskLevel === "MEDIUM" ? "var(--amber)" : "var(--green)"}`,
+                  borderRadius: 2, fontSize: 12, color: "var(--text)", lineHeight: 1.6,
+                }}>
+                  {data.risk_status}
+                </div>
+              )}
+
+              {/* Executive summary */}
+              <ExecutiveSummaryPanel summary={data.executive_summary} />
+
+              {/* Correlations */}
+              <CorrelationsPanel correlations={data.intelligence_correlations} />
+
+              {/* 2-col grid for detail panels */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <ExposedAssetsPanel assets={data.exposed_assets} summary={data.exposure_summary} />
+                <RecommendationsPanel recommendations={data.recommendations} riskIssues={data.risk_issues} />
+                <DnsPanel dns={data.dns} />
+                <TlsPanel ssl={data.ssl_certificate} />
+                <SubdomainList subdomains={data.subdomains} />
+                <TechnologyStack technology={data.technology} />
+              </div>
+
+              {/* WHOIS */}
+              {data.whois && !data.whois.error && (
+                <div className="panel fade-up">
+                  <div className="panel-header">
+                    <span style={{ color: "var(--text-dim)" }}>◌</span>
+                    <span className="label">WHOIS</span>
                   </div>
-                  
-                  {/* Scan History */}
-                  <div className="pt-4 border-t border-gray-800/50">
-                    <div className="text-xs text-gray-500 uppercase tracking-wider mb-3">Scan History</div>
-                    {data.history_correlation?.status === 'REPEAT_TARGET' ? (
-                      <div className="flex items-start gap-3 p-3 bg-amber-500/5 border border-amber-500/20 rounded-lg">
-                        <AlertTriangle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
-                        <div>
-                          <div className="font-bold text-amber-400 text-sm">Repeat Target</div>
-                          <div className="text-xs text-gray-500 mt-1">
-                            This domain has been scanned {data.history_correlation.previous_scans} time(s) before
-                          </div>
-                          {data.history_correlation.last_scan && (
-                            <div className="text-xs text-gray-600 mt-1">
-                              Last scan: {data.history_correlation.last_scan}
-                            </div>
-                          )}
-                        </div>
+                  <div style={{ padding: "10px 14px", display: "flex", flexWrap: "wrap", gap: 16 }}>
+                    {[
+                      ["Registrar", data.whois.registrar],
+                      ["Registered", data.whois.creation_date],
+                      ["Expires", data.whois.expiration_date],
+                      ["Updated", data.whois.updated_date],
+                    ].filter(([, v]) => v).map(([k, v]) => (
+                      <div key={k}>
+                        <div style={{ fontSize: 9, color: "var(--text-dim)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 2 }}>{k}</div>
+                        <div style={{ fontSize: 11, color: "var(--text)" }}>{v}</div>
                       </div>
-                    ) : (
-                      <div className="flex items-start gap-3 p-3 bg-emerald-500/5 border border-emerald-500/20 rounded-lg">
-                        <CheckCircle className="w-5 h-5 text-emerald-400 flex-shrink-0 mt-0.5" />
-                        <div>
-                          <div className="font-bold text-emerald-400 text-sm">First Reconnaissance</div>
-                          <div className="text-xs text-gray-500 mt-1">Initial intelligence gathering for this target</div>
-                        </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Wayback */}
+              {data.wayback && !data.wayback.error && data.wayback.total_snapshots > 0 && (
+                <div className="panel fade-up">
+                  <div className="panel-header">
+                    <span style={{ color: "var(--text-dim)" }}>◷</span>
+                    <span className="label">Web Archive</span>
+                  </div>
+                  <div style={{ padding: "10px 14px", display: "flex", gap: 16, flexWrap: "wrap" }}>
+                    <div>
+                      <div style={{ fontSize: 9, color: "var(--text-dim)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 2 }}>Snapshots</div>
+                      <div style={{ fontSize: 14, fontFamily: "var(--display)", fontWeight: 700, color: "var(--text)" }}>{data.wayback.total_snapshots?.toLocaleString()}</div>
+                    </div>
+                    {data.wayback.first_seen && (
+                      <div>
+                        <div style={{ fontSize: 9, color: "var(--text-dim)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 2 }}>First seen</div>
+                        <div style={{ fontSize: 11, color: "var(--text)" }}>{data.wayback.first_seen}</div>
+                      </div>
+                    )}
+                    {data.wayback.last_seen && (
+                      <div>
+                        <div style={{ fontSize: 9, color: "var(--text-dim)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 2 }}>Last seen</div>
+                        <div style={{ fontSize: 11, color: "var(--text)" }}>{data.wayback.last_seen}</div>
                       </div>
                     )}
                   </div>
                 </div>
+              )}
 
-                {/* Critical Issues & Recommendations */}
-                <div className="md:col-span-2 space-y-6">
-                  {/* Critical Alerts */}
-                  <div>
-                    <div className="flex items-center justify-between mb-3">
-                      <div className="text-sm font-bold text-gray-400 uppercase tracking-wider">
-                        Critical Security Findings
-                      </div>
-                      <span className="px-3 py-1 bg-rose-500/10 border border-rose-500/30 rounded-full text-rose-400 text-xs font-bold">
-                        {data.risk_issues?.length || 0} Issues
-                      </span>
-                    </div>
-                    
-                    <div className="bg-black/40 rounded-xl p-4 border border-gray-800/50 min-h-[200px]">
-                      {data.risk_issues?.length > 0 ? (
-                        <div className="grid md:grid-cols-2 gap-3">
-                          {data.risk_issues.map((issue, i) => (
-                            <div key={i} className="flex items-start gap-3 p-3 bg-rose-500/5 border border-rose-500/20 rounded-lg group hover:border-rose-500/40 transition-colors">
-                              <XCircle className="w-4 h-4 text-rose-400 flex-shrink-0 mt-0.5" />
-                              <span className="text-rose-300 text-sm leading-relaxed">{issue}</span>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="flex flex-col items-center justify-center h-full py-8">
-                          <CheckCircle className="w-12 h-12 text-emerald-500 mb-3" />
-                          <div className="text-emerald-400 font-bold text-lg">No Critical Vulnerabilities</div>
-                          <div className="text-gray-500 text-sm mt-2">Security posture appears strong</div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Recommendations */}
-                  {data.recommendations && data.recommendations.length > 0 && (
-                    <div>
-                      <div className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-3">
-                        Security Recommendations
-                      </div>
-                      <div className="space-y-2">
-                        {data.recommendations.slice(0, 4).map((rec, i) => (
-                          <div key={i} className="flex items-start gap-3 p-3 bg-cyan-500/5 border border-cyan-500/20 rounded-lg group hover:border-cyan-500/40 transition-colors">
-                            <Zap className="w-4 h-4 text-cyan-400 flex-shrink-0 mt-0.5" />
-                            <span className="text-cyan-300 text-sm leading-relaxed">{rec}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
+              {/* Footer metadata */}
+              <div style={{
+                padding: "8px 0", fontSize: 9, color: "var(--text-dim)",
+                borderTop: "1px solid var(--border)", marginTop: 4,
+                display: "flex", gap: 16,
+              }}>
+                <span>Target: {data.target}</span>
+                {data.timestamp && <span>Scanned: {data.timestamp}</span>}
+                {data.corerecon_version && <span>CoreRecon {data.corerecon_version}</span>}
               </div>
             </div>
-
-            {/* Intelligence Cards Grid */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <ExpandableCard 
-                title="Infrastructure Intelligence" 
-                icon={Globe} 
-                data={data.infrastructure}
-                renderContent={renderInfrastructure}
-              />
-              
-              <ExpandableCard 
-                title="System Fingerprint" 
-                icon={Fingerprint} 
-                data={data.fingerprint}
-                renderContent={renderFingerprint}
-              />
-              
-              <ExpandableCard 
-                title="SSL/TLS Certificate" 
-                icon={Lock} 
-                data={data.ssl_certificate}
-                renderContent={renderSSL}
-              />
-              
-              <ExpandableCard 
-                title="DNS Records" 
-                icon={Activity} 
-                data={data.dns}
-                renderContent={renderDNS}
-              />
-              
-              <ExpandableCard 
-                title="Subdomain Discovery" 
-                icon={Terminal} 
-                data={data.subdomains}
-                renderContent={renderSubdomains}
-              />
-              
-              <ExpandableCard 
-                title="WHOIS Information" 
-                icon={Database} 
-                data={data.whois}
-                renderContent={renderWHOIS}
-              />
-              
-              <ExpandableCard 
-                title="Technology Stack" 
-                icon={Cpu} 
-                data={data.technology}
-                renderContent={renderTechnology}
-              />
-              
-              <ExpandableCard 
-                title="Web Archives" 
-                icon={History} 
-                data={data.wayback}
-                renderContent={renderWayback}
-              />
-            </div>
-
-            {/* Footer */}
-            <div className="mt-12 pt-8 border-t border-gray-800/50 text-center">
-              <p className="text-sm text-gray-600">CoreRecon Intelligence Platform v1.0</p>
-              <p className="text-xs text-gray-700 mt-2">For authorized security testing and research purposes only</p>
-            </div>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      </main>
     </div>
   );
 }
