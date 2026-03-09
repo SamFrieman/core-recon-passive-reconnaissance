@@ -221,6 +221,10 @@ async def report(domain: str):
             raise HTTPException(status_code=500, detail=f"Could not generate report: {str(e)}")
 
     try:
+        # Sanitize technology data — new fingerprinter returns {category: [list]}
+        # but can return {"note": "..."} when empty; PDF generator crashes on non-list values
+        if "technology" in data:
+            data["technology"] = _sanitize_technology_for_pdf(data["technology"])
         pdf_bytes = generate_pdf_report(data)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
@@ -546,6 +550,27 @@ def _risk_status_text(target: str, score: int) -> str:
         "HIGH":     f"{target} has significant vulnerabilities. Remediation strongly recommended.",
         "CRITICAL": f"{target} has critical security weaknesses requiring immediate attention.",
     }.get(level, "Assessment complete.")
+
+
+def _sanitize_technology_for_pdf(technology: Any) -> dict:
+    """
+    Ensure technology data is a dict of {category: [list of dicts]}.
+    The new fingerprinter can return {"note": "..."} or {"error": "..."}
+    when nothing is detected — both have string values, not lists.
+    The PDF generator calls .get() on list items and crashes on strings.
+    This normalises any non-list values out before PDF generation.
+    """
+    if not isinstance(technology, dict):
+        return {}
+    sanitized = {}
+    for cat, items in technology.items():
+        if not isinstance(items, list):
+            continue  # drop "note", "error", and any other string/non-list values
+        # Ensure each item is a dict
+        clean_items = [i if isinstance(i, dict) else {"name": str(i), "version": "", "eol_risk": False, "eol_note": None} for i in items]
+        if clean_items:
+            sanitized[cat] = clean_items
+    return sanitized
 
 
 def _build_recommendations(risk_issues: list) -> list:
