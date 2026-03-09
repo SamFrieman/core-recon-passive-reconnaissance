@@ -1,5 +1,5 @@
 """
-CoreRecon v2.0 — PDF Report Generator
+CoreRecon v2.2 — PDF Report Generator
 Extracted from v1 main.py. Called by main.py as:
     from backend.report import generate_pdf_report
     pdf_bytes = generate_pdf_report(scan_data)
@@ -8,11 +8,28 @@ from datetime import datetime
 from fpdf import FPDF
 
 
+def _as_dict(value, fallback=None) -> dict:
+    """Return value if it's a dict, otherwise fallback (default {})."""
+    if fallback is None:
+        fallback = {}
+    return value if isinstance(value, dict) else fallback
+
+
+def _as_list(value, fallback=None) -> list:
+    """Return value if it's a list, otherwise fallback (default [])."""
+    if fallback is None:
+        fallback = []
+    return value if isinstance(value, list) else fallback
+
+
 def generate_pdf_report(data: dict) -> bytes:
     """
     Generate a full intelligence PDF report from scan data.
     Returns raw PDF bytes suitable for streaming to the client.
     """
+    if not isinstance(data, dict):
+        data = {}
+
     clean_domain = data.get("target", "unknown")
 
     pdf = FPDF()
@@ -112,7 +129,7 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.set_xy(0, 280)
     pdf.set_font("Arial", "I", 8)
     pdf.set_text_color(100, 100, 100)
-    pdf.cell(0, 5, "Powered by CoreRecon Intelligence Platform v2.0", ln=True, align="C")
+    pdf.cell(0, 5, "Powered by CoreRecon Intelligence Platform v2.2", ln=True, align="C")
 
     # ============================================================
     # PAGE 2 - EXECUTIVE SUMMARY
@@ -160,7 +177,7 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.ln(5)
     add_divider()
 
-    issues = data.get("risk_issues", [])
+    issues = _as_list(data.get("risk_issues", []))
     pdf.set_font("Arial", "B", 12)
     pdf.set_text_color(255, 60, 60)
     pdf.cell(0, 7, f"CRITICAL FINDINGS ({len(issues)})", ln=True)
@@ -185,7 +202,7 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.ln(5)
     add_divider()
 
-    recommendations = data.get("recommendations", [])
+    recommendations = _as_list(data.get("recommendations", []))
     if recommendations:
         pdf.set_font("Arial", "B", 12)
         pdf.set_text_color(0, 150, 200)
@@ -205,7 +222,8 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.add_page()
     add_header_bar("01. INFRASTRUCTURE & NETWORK INTELLIGENCE")
 
-    infra = data.get("infrastructure", {})
+    # FIX: guard against infrastructure being a non-dict (e.g. string error)
+    infra = _as_dict(data.get("infrastructure"))
     status = infra.get("status", "UNKNOWN")
     if status == "ONLINE":
         pdf.set_fill_color(0, 180, 100)
@@ -221,9 +239,13 @@ def generate_pdf_report(data: dict) -> bytes:
     add_key_value("Primary IP Address", infra.get("ip", "N/A"), True)
     add_key_value("Reverse DNS", infra.get("reverse_dns", "N/A"))
 
-    if infra.get("asn"):
-        add_key_value("ASN Number", infra["asn"].get("number", "N/A"))
-        add_key_value("ASN Organization", infra["asn"].get("organization", "N/A"))
+    # FIX: guard against asn being a string like "AS12345" instead of a dict
+    asn = infra.get("asn")
+    if isinstance(asn, dict):
+        add_key_value("ASN Number", asn.get("number", "N/A"))
+        add_key_value("ASN Organization", asn.get("organization", "N/A"))
+    elif asn:
+        add_key_value("ASN", str(asn))
 
     add_key_value("ISP Provider", infra.get("provider", "N/A"))
     add_key_value("Organization", infra.get("organization", "N/A"))
@@ -231,7 +253,7 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.ln(3)
     add_divider()
 
-    loc = infra.get("location", {})
+    loc = _as_dict(infra.get("location"))
     if loc:
         pdf.set_font("Arial", "B", 10)
         pdf.set_text_color(0, 150, 200)
@@ -249,7 +271,8 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.add_page()
     add_header_bar("02. SYSTEM FINGERPRINT & SECURITY HEADERS")
 
-    fing = data.get("fingerprint", {})
+    # FIX: guard against fingerprint being a non-dict
+    fing = _as_dict(data.get("fingerprint"))
     add_key_value("Web Server", fing.get("server", "Hidden/Unknown"))
     add_key_value("Protocol", fing.get("protocol", "N/A"), True)
     add_key_value("HTTP Status", fing.get("status_code", "N/A"))
@@ -270,8 +293,10 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.cell(120, 6, "Security Header", 1, 0, "L", True)
     pdf.cell(60, 6, "Status", 1, 1, "C", True)
 
+    # FIX: guard against security being a non-dict
+    security_headers = _as_dict(fing.get("security"))
     pdf.set_font("Arial", "", 8)
-    for head, val in fing.get("security", {}).items():
+    for head, val in security_headers.items():
         pdf.cell(120, 5, safe_text(head.replace("-", " ").upper()), 1, 0, "L")
         if val == "MISSING":
             pdf.set_fill_color(255, 240, 240)
@@ -288,10 +313,16 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.add_page()
     add_header_bar("03. SSL/TLS CERTIFICATE INFORMATION")
 
-    ssl_data = data.get("ssl_certificate", {})
+    # FIX: guard against ssl_certificate being a non-dict
+    ssl_data = _as_dict(data.get("ssl_certificate"))
 
-    if "error" not in ssl_data:
+    if "error" not in ssl_data and ssl_data:
         days_remaining = ssl_data.get("days_remaining", 0)
+        try:
+            days_remaining = int(days_remaining)
+        except (TypeError, ValueError):
+            days_remaining = 0
+
         if days_remaining > 30:
             pdf.set_fill_color(0, 180, 100)
             status_text = "VALID"
@@ -339,7 +370,7 @@ def generate_pdf_report(data: dict) -> bytes:
         add_key_value("Valid From", ssl_data.get("valid_from", "N/A"))
         add_key_value("Valid Until", ssl_data.get("valid_until", "N/A"))
 
-        sans = ssl_data.get("subject_alternative_names", [])
+        sans = _as_list(ssl_data.get("subject_alternative_names"))
         if sans:
             pdf.ln(2)
             pdf.set_font("Arial", "B", 9)
@@ -363,11 +394,14 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.add_page()
     add_header_bar("04. DNS RECORDS & CONFIGURATION")
 
-    dns_data = data.get("dns", {})
+    # FIX: guard against dns being a non-dict
+    dns_data = _as_dict(data.get("dns"))
     for r_type, records in dns_data.items():
-        if not records or not isinstance(records, list) or len(records) == 0:
+        # FIX: ensure records is a list before indexing
+        if not isinstance(records, list) or len(records) == 0:
             continue
-        if "Query failed" in records[0] or "timeout" in records[0]:
+        first = str(records[0])
+        if "Query failed" in first or "timeout" in first:
             continue
 
         pdf.set_font("Arial", "B", 10)
@@ -398,7 +432,8 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.add_page()
     add_header_bar("05. WHOIS & DOMAIN REGISTRATION")
 
-    whois_data = data.get("whois", {})
+    # FIX: guard against whois being a non-dict
+    whois_data = _as_dict(data.get("whois"))
     if not whois_data.get("error"):
         add_key_value("Registrar", whois_data.get("registrar", "N/A"), True)
         add_key_value("Organization", whois_data.get("organization", "Private/Redacted"))
@@ -417,7 +452,7 @@ def generate_pdf_report(data: dict) -> bytes:
         add_key_value("Last Updated", whois_data.get("updated_date", "Unknown"))
         add_key_value("Expires", whois_data.get("expiration_date", "Unknown"))
 
-        ns_list = whois_data.get("name_servers", [])
+        ns_list = _as_list(whois_data.get("name_servers"))
         if ns_list:
             pdf.ln(3)
             add_divider()
@@ -443,9 +478,23 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.add_page()
     add_header_bar("06. TECHNOLOGY STACK & WEB FRAMEWORK")
 
-    tech_data = data.get("technology", {})
-    if isinstance(tech_data, dict) and "message" not in tech_data and "error" not in tech_data:
-        for category, items in tech_data.items():
+    # FIX: guard against technology being a non-dict or old flat-list format
+    raw_tech = data.get("technology")
+
+    # Normalise: if old format had a "detected_technologies" flat list, wrap it
+    if isinstance(raw_tech, list):
+        tech_data = {"detected": raw_tech}
+    elif isinstance(raw_tech, dict):
+        tech_data = raw_tech
+    else:
+        tech_data = {}
+
+    # Remove noise keys that aren't category→list mappings
+    skip_keys = {"message", "error", "status", "note"}
+    renderable = {k: v for k, v in tech_data.items() if k not in skip_keys and isinstance(v, list)}
+
+    if renderable:
+        for category, items in renderable.items():
             if pdf.get_y() > 250:
                 pdf.add_page()
 
@@ -455,27 +504,26 @@ def generate_pdf_report(data: dict) -> bytes:
             pdf.ln(1)
             pdf.set_fill_color(245, 245, 250)
 
-            if isinstance(items, list):
-                for item in items[:15]:
-                    pdf.rect(15, pdf.get_y(), 180, 6, "F")
-                    if isinstance(item, dict):
-                        name = item.get("name", "Unknown")
-                        ver = item.get("version", "Undetected")
-                        pdf.set_xy(18, pdf.get_y() + 1.5)
-                        pdf.set_font("Arial", "B", 8)
-                        pdf.set_text_color(60, 60, 60)
-                        pdf.cell(100, 3, safe_text(name), ln=False)
-                        pdf.set_font("Courier", "", 7)
-                        if ver != "Undetected":
-                            pdf.set_text_color(0, 150, 200)
-                        else:
-                            pdf.set_text_color(150, 150, 150)
-                        pdf.cell(0, 3, safe_text(f"v{ver}"), ln=True)
+            for item in items[:15]:
+                pdf.rect(15, pdf.get_y(), 180, 6, "F")
+                if isinstance(item, dict):
+                    name = item.get("name", "Unknown")
+                    ver = item.get("version", "Undetected")
+                    pdf.set_xy(18, pdf.get_y() + 1.5)
+                    pdf.set_font("Arial", "B", 8)
+                    pdf.set_text_color(60, 60, 60)
+                    pdf.cell(100, 3, safe_text(name), ln=False)
+                    pdf.set_font("Courier", "", 7)
+                    if ver and ver != "Undetected":
+                        pdf.set_text_color(0, 150, 200)
                     else:
-                        pdf.set_xy(18, pdf.get_y() + 1.5)
-                        pdf.set_font("Arial", "", 8)
-                        pdf.set_text_color(60, 60, 60)
-                        pdf.cell(0, 3, safe_text(str(item)), ln=True)
+                        pdf.set_text_color(150, 150, 150)
+                    pdf.cell(0, 3, safe_text(f"v{ver}") if ver else "", ln=True)
+                else:
+                    pdf.set_xy(18, pdf.get_y() + 1.5)
+                    pdf.set_font("Arial", "", 8)
+                    pdf.set_text_color(60, 60, 60)
+                    pdf.cell(0, 3, safe_text(str(item)), ln=True)
 
             pdf.ln(3)
     else:
@@ -492,7 +540,8 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.add_page()
     add_header_bar("07. SUBDOMAIN DISCOVERY & ENUMERATION")
 
-    subs = data.get("subdomains", {})
+    # FIX: guard against subdomains being a non-dict
+    subs = _as_dict(data.get("subdomains"))
     sub_count = subs.get("count", 0)
 
     pdf.set_font("Arial", "B", 14)
@@ -500,15 +549,16 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.cell(0, 8, f"{sub_count} SUBDOMAINS DISCOVERED", ln=True)
     pdf.ln(3)
 
-    if subs.get("sources"):
+    sources = _as_list(subs.get("sources"))
+    if sources:
         pdf.set_font("Arial", "", 8)
         pdf.set_text_color(120, 120, 120)
-        pdf.cell(0, 4, f"Sources: {', '.join(subs['sources'])}", ln=True)
+        pdf.cell(0, 4, f"Sources: {', '.join(sources)}", ln=True)
         pdf.ln(2)
 
     add_divider()
 
-    sub_list = subs.get("subdomains", [])
+    sub_list = _as_list(subs.get("subdomains"))
     if sub_list:
         pdf.set_font("Courier", "", 7)
         pdf.set_text_color(60, 60, 60)
@@ -535,7 +585,8 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.add_page()
     add_header_bar("08. WEB ARCHIVE HISTORY (WAYBACK MACHINE)")
 
-    wb = data.get("wayback", {})
+    # FIX: guard against wayback being a non-dict
+    wb = _as_dict(data.get("wayback"))
     if wb.get("available"):
         pdf.set_fill_color(240, 255, 240)
         pdf.rect(15, pdf.get_y(), 180, 10, "F")
@@ -606,15 +657,15 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.cell(0, 6, "RECONNAISSANCE STATISTICS", ln=True)
     pdf.ln(2)
 
+    # FIX: safe tech count — handle both dict and non-dict tech_data
+    tech_count = sum(len(v) for v in renderable.values()) if renderable else 0
+
     stats = [
         ("Total Issues Found", len(issues)),
         ("Security Recommendations", len(recommendations)),
         ("Subdomains Discovered", sub_count),
-        ("DNS Records Retrieved", sum(1 for records in dns_data.values() if records)),
-        (
-            "Technologies Identified",
-            sum(len(items) for items in tech_data.values()) if isinstance(tech_data, dict) else 0,
-        ),
+        ("DNS Records Retrieved", sum(1 for v in dns_data.values() if isinstance(v, list) and v)),
+        ("Technologies Identified", tech_count),
     ]
     for label, value in stats:
         add_key_value(label, value)
@@ -637,7 +688,7 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.set_xy(0, 280)
     pdf.set_font("Arial", "", 7)
     pdf.set_text_color(150, 150, 150)
-    pdf.cell(0, 3, "Generated by CoreRecon Intelligence Platform v2.0", ln=True, align="C")
+    pdf.cell(0, 3, "Generated by CoreRecon Intelligence Platform v2.2", ln=True, align="C")
     pdf.cell(
         0,
         3,
