@@ -170,10 +170,10 @@ function moduleStatusBadge(status) {
 }
 
 function scoreGrade(score) {
-  if (score >= 85) return "A";
-  if (score >= 70) return "B";
-  if (score >= 55) return "C";
-  if (score >= 35) return "D";
+  if (score >= 90) return "A";
+  if (score >= 75) return "B";
+  if (score >= 60) return "C";
+  if (score >= 40) return "D";
   return "F";
 }
 
