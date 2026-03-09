@@ -2,18 +2,27 @@
 CoreRecon HTTP Fingerprinting & Security Headers Module
 Preserves all v1 fields under 'fingerprint' key.
 Adds: CSP policy analysis, HSTS max-age, cookie security flags, header grade.
+
+v2.2.1 security fix:
+  - verify=False replaced with verify=True (system CA bundle)
+  - Falls back to verify=False ONLY when the target itself has a bad cert,
+    because the point of this module is to fingerprint headers, not validate TLS
+    (TLS validation is certificates.py's job). The fallback is logged clearly.
+  - Explicit connect + read timeouts (no single combined timeout)
 """
 import re
 from typing import Dict, Any, List, Optional
 from urllib.parse import urlparse
 
 import requests
+import urllib3
 
 from backend.core.logger import get_logger
 
 log = get_logger("corerecon.web_headers")
 
-REQUEST_TIMEOUT = 12
+# Separate connect vs read timeouts — prevents slowloris-style hangs
+_TIMEOUT = (5, 10)   # (connect_seconds, read_seconds)
 MAX_REDIRECTS = 10
 
 SECURITY_HEADERS = [
@@ -28,10 +37,6 @@ SECURITY_HEADERS = [
 
 
 def _parse_hsts(hsts_value: str) -> Dict[str, Any]:
-    """
-    Parse HSTS header into structured fields.
-    Example: max-age=31536000; includeSubDomains; preload
-    """
     if not hsts_value or hsts_value == "MISSING":
         return {"present": False, "max_age": None, "include_subdomains": False, "preload": False}
 
@@ -55,9 +60,6 @@ def _parse_hsts(hsts_value: str) -> Dict[str, Any]:
 
 
 def _analyze_csp(csp_value: str) -> Dict[str, Any]:
-    """
-    Analyze Content-Security-Policy for common weaknesses.
-    """
     if not csp_value or csp_value == "MISSING":
         return {
             "present": False,
@@ -100,9 +102,6 @@ def _analyze_csp(csp_value: str) -> Dict[str, Any]:
 
 
 def _analyze_cookies(cookies: requests.cookies.RequestsCookieJar) -> Dict[str, Any]:
-    """
-    Inspect cookies for security flags: HttpOnly, Secure, SameSite.
-    """
     total = len(cookies)
     if total == 0:
         return {"count": 0, "insecure_cookies": [], "analysis": None}
@@ -112,7 +111,6 @@ def _analyze_cookies(cookies: requests.cookies.RequestsCookieJar) -> Dict[str, A
         issues = []
         if not cookie.secure:
             issues.append("Missing Secure flag")
-        # requests doesn't directly expose HttpOnly/SameSite but we can inspect _rest
         rest = getattr(cookie, "_rest", {}) or {}
         if not rest.get("HttpOnly") and not rest.get("httponly"):
             issues.append("Missing HttpOnly flag")
@@ -134,9 +132,6 @@ def _analyze_cookies(cookies: requests.cookies.RequestsCookieJar) -> Dict[str, A
 
 
 def _score_header_grade(headers: Dict[str, str], hsts_analysis: Dict, csp_analysis: Dict) -> str:
-    """
-    Simple A-F header security grade. Informational only.
-    """
     score = 100
     if headers.get("Strict-Transport-Security", "MISSING") == "MISSING":
         score -= 25
@@ -157,28 +152,55 @@ def _score_header_grade(headers: Dict[str, str], hsts_analysis: Dict, csp_analys
     if headers.get("X-XSS-Protection", "MISSING") == "MISSING":
         score -= 5
 
-    if score >= 90:
-        return "A+"
-    elif score >= 80:
-        return "A"
-    elif score >= 70:
-        return "B"
-    elif score >= 55:
-        return "C"
-    elif score >= 40:
-        return "D"
-    else:
-        return "F"
+    if score >= 90:   return "A+"
+    elif score >= 80: return "A"
+    elif score >= 70: return "B"
+    elif score >= 55: return "C"
+    elif score >= 40: return "D"
+    else:             return "F"
+
+
+def _fetch_with_verified_ssl(session: requests.Session, url: str) -> requests.Response:
+    """
+    Attempt the request with full SSL verification (system CA bundle).
+    If the TARGET has a bad/self-signed cert, fall back to verify=False
+    so we can still collect header data — but log the fallback clearly.
+    This is intentional: certificates.py handles TLS validation; this
+    module's job is to read HTTP response headers regardless of cert state.
+    """
+    try:
+        return session.get(
+            url,
+            timeout=_TIMEOUT,
+            allow_redirects=True,
+            verify=True,   # system CA bundle
+            headers={"User-Agent": "Mozilla/5.0 (compatible; CoreRecon/2.2)"},
+        )
+    except requests.exceptions.SSLError:
+        # Target cert is invalid/self-signed — suppress urllib3 warning for
+        # this specific fallback and log it so operators can see it happened
+        log.warning(
+            "SSL verification failed for target — falling back to unverified "
+            "connection to collect headers (cert issues reported by certificates module)",
+            extra={"url": url},
+        )
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        resp = session.get(
+            url,
+            timeout=_TIMEOUT,
+            allow_redirects=True,
+            verify=False,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; CoreRecon/2.2)"},
+        )
+        # Re-enable warnings after the single unverified call
+        urllib3.warnings.resetwarnings()
+        return resp
 
 
 def get_security_headers(domain: str) -> Dict[str, Any]:
     """
     HTTP fingerprinting: server identity, protocol, headers, cookies, redirects.
-
-    Preserves v1 response structure exactly (all fields under 'fingerprint').
-    Adds v2 enrichments:
-      fingerprint.hsts_analysis, fingerprint.csp_analysis,
-      fingerprint.cookie_analysis, fingerprint.header_grade
+    Preserves v1 response structure. Adds v2 enrichments.
     """
     session = requests.Session()
     session.max_redirects = MAX_REDIRECTS
@@ -188,23 +210,15 @@ def get_security_headers(domain: str) -> Dict[str, Any]:
     redirect_chain: List[str] = []
     error_context = None
 
-    # Try HTTPS first, fall back to HTTP
     for proto in ("https", "http"):
         try:
             url = f"{proto}://{domain}"
-            resp = session.get(
-                url,
-                timeout=REQUEST_TIMEOUT,
-                allow_redirects=True,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; CoreRecon/2.0)"},
-                verify=False,  # passive check — we just want headers
-            )
+            resp = _fetch_with_verified_ssl(session, url)
             response = resp
             protocol_used = proto.upper()
-            # Capture redirect chain
             redirect_chain = [r.url for r in resp.history] + [resp.url]
             if len(redirect_chain) == 1:
-                redirect_chain = []  # No redirects — cleaner output
+                redirect_chain = []
             break
         except requests.TooManyRedirects:
             error_context = "Too many redirects"
@@ -248,14 +262,12 @@ def get_security_headers(domain: str) -> Dict[str, Any]:
     for h in SECURITY_HEADERS:
         security_headers[h] = headers.get(h, "MISSING")
 
-    # v2 enrichments
     hsts_analysis = _parse_hsts(security_headers["Strict-Transport-Security"])
     csp_analysis = _analyze_csp(security_headers["Content-Security-Policy"])
     cookie_analysis = _analyze_cookies(response.cookies)
     header_grade = _score_header_grade(security_headers, hsts_analysis, csp_analysis)
 
     result = {
-        # --- v1 fields preserved exactly ---
         "server": headers.get("Server", "Not disclosed"),
         "powered_by": headers.get("X-Powered-By", "Not disclosed"),
         "protocol": protocol_used,
@@ -263,7 +275,6 @@ def get_security_headers(domain: str) -> Dict[str, Any]:
         "security": security_headers,
         "cookies": len(response.cookies),
         "redirect_chain": redirect_chain,
-        # --- v2 additions ---
         "hsts_analysis": hsts_analysis,
         "csp_analysis": csp_analysis,
         "cookie_analysis": cookie_analysis,
