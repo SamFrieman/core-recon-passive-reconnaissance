@@ -1,18 +1,20 @@
 """
-CoreRecon v2.1 — Main Scan Orchestrator + API
-Coordinates all intelligence modules via concurrent execution and assembles
-the final scan result with intelligence correlations and executive summary.
+CoreRecon v2.2 — Main Scan Orchestrator + API
 
-v2.1 changes:
-  Phase 6 — Concurrent module execution via ThreadPoolExecutor
-  Phase 7 — Deterministic executive summary generated from scan findings
+Architecture improvements over v2.1:
+  - Fixed module import aliases (v2.1 had stubs silently replacing real modules)
+  - ModuleRegistry pattern for extensible module management
+  - module_status now surface PASS/SOFT_FAIL/TIMEOUT with reasons
+  - Cleaner separation: orchestration vs. API layer
+  - Executive summary and correlations always included in response
 """
 import io
 import time
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,33 +31,72 @@ from backend.core.normalizer import normalize_target
 from backend.db import init_db, save_scan, get_scan_history, get_scan_data, get_all_history
 from backend.report import generate_pdf_report
 
-# Module imports
-from backend.modules.infrastructure import get_infrastructure
-from backend.modules.subdomains import discover_subdomains
-from backend.modules.wayback import query_wayback
-
-# These modules exist in the v2.0 codebase and are imported as-is
-try:
-    from backend.modules.dns import get_dns_records
-    from backend.modules.fingerprint import fingerprint_target
-    from backend.modules.ssl import get_ssl_certificate
-    from backend.modules.technology import detect_technology
-    from backend.modules.whois import get_whois
-except ImportError:
-    # Fallback stubs for environments where only v2.1 modules are present
-    def get_dns_records(target): return {}
-    def fingerprint_target(target): return {}
-    def get_ssl_certificate(target): return {}
-    def detect_technology(target): return {}
-    def get_whois(target): return {}
-
 log = get_logger("corerecon.main")
+
+# ---------------------------------------------------------------------------
+# Module imports — explicit, no silent stubs
+# Each module maps its real file path. Import errors surface immediately.
+# ---------------------------------------------------------------------------
+
+def _import_module_fn(module_path: str, fn_name: str) -> Optional[Callable]:
+    """Import a module function, returning None and logging if missing."""
+    try:
+        import importlib
+        mod = importlib.import_module(module_path)
+        return getattr(mod, fn_name)
+    except (ImportError, AttributeError) as e:
+        log.warning(f"Module unavailable: {module_path}.{fn_name} — {e}")
+        return None
+
+
+# Real module functions — using actual file names from backend/modules/
+_get_infrastructure  = _import_module_fn("backend.modules.infrastructure",  "get_infrastructure")
+_get_dns_records     = _import_module_fn("backend.modules.dns_intel",        "get_dns_records")
+_fingerprint_target  = _import_module_fn("backend.modules.web_headers",      "get_security_headers")
+_get_ssl_certificate = _import_module_fn("backend.modules.certificates",     "get_ssl_certificate")
+_discover_subdomains = _import_module_fn("backend.modules.subdomains",       "discover_subdomains")
+_query_wayback       = _import_module_fn("backend.modules.wayback",          "query_wayback")
+_get_whois           = _import_module_fn("backend.modules.whois_intel",      "get_whois_data")
+_detect_technology   = _import_module_fn("backend.modules.technology",       "get_technology_stack")
+
+
+# ---------------------------------------------------------------------------
+# Module Registry
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ModuleSpec:
+    """Defines a single recon module's execution contract."""
+    key: str
+    fn: Optional[Callable]
+    timeout_seconds: int
+    description: str
+    critical: bool = False  # If True, failure raises HardFailError
+
+    def is_available(self) -> bool:
+        return self.fn is not None
+
+
+# Registry of all modules — add new modules here only
+MODULE_REGISTRY: List[ModuleSpec] = [
+    ModuleSpec("infrastructure",  _get_infrastructure,  25,  "IP resolution, ASN, CDN detection, port probing"),
+    ModuleSpec("dns",             _get_dns_records,     20,  "DNS records, SPF, DMARC, DNSSEC analysis"),
+    ModuleSpec("fingerprint",     _fingerprint_target,  15,  "HTTP headers, security posture, cookie analysis"),
+    ModuleSpec("ssl_certificate", _get_ssl_certificate, 20,  "TLS certificate parsing and risk analysis"),
+    ModuleSpec("subdomains",      _discover_subdomains, 60,  "Certificate transparency, passive subdomain discovery"),
+    ModuleSpec("wayback",         _query_wayback,       30,  "Web archive history and path intelligence"),
+    ModuleSpec("whois",           _get_whois,           20,  "Domain registration and registrar data"),
+    ModuleSpec("technology",      _detect_technology,   20,  "Technology stack fingerprinting (Wappalyzer)"),
+]
+
+MODULE_TIMEOUT_BUFFER = 15  # Extra seconds beyond longest module timeout
+
 
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="CoreRecon API", version="2.1.0")
+app = FastAPI(title="CoreRecon API", version="2.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,6 +110,16 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     init_db()
+    available = [m.key for m in MODULE_REGISTRY if m.is_available()]
+    unavailable = [m.key for m in MODULE_REGISTRY if not m.is_available()]
+    log.info(
+        "CoreRecon startup complete",
+        extra={
+            "version": "2.2.0",
+            "modules_available": available,
+            "modules_unavailable": unavailable,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -77,15 +128,21 @@ async def startup_event():
 
 @app.get("/")
 async def root():
-    return {"status": "online", "service": "CoreRecon API", "version": "2.1.0"}
+    return {
+        "status": "online",
+        "service": "CoreRecon API",
+        "version": "2.2.0",
+        "modules": {m.key: m.is_available() for m in MODULE_REGISTRY},
+    }
 
 
 @app.get("/api/v1/health")
 async def health():
     return {
         "status": "healthy",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "cache_size": len(scan_cache),
+        "modules": {m.key: {"available": m.is_available(), "timeout": m.timeout_seconds} for m in MODULE_REGISTRY},
         "uptime": "ok",
     }
 
@@ -98,12 +155,11 @@ async def recon(domain: str):
     except HardFailError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Return cached result if available
     cached = scan_cache.get(target)
     if cached:
+        log.info("Cache hit", extra={"target": target})
         return JSONResponse(content=cached)
 
-    # Run the scan
     try:
         result = run_scan(target)
     except HardFailError as e:
@@ -112,12 +168,13 @@ async def recon(domain: str):
         log.error(f"Scan failed for {target}: {e}")
         raise HTTPException(status_code=500, detail=f"Scan failed: {str(e)}")
 
-    # Enrich with metadata
+    # Metadata enrichment
     result["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     result["original_input"] = normalized.original_input
     result["input_type"] = normalized.input_type
+    result["corerecon_version"] = "2.2.0"
 
-    # Flat risk fields for frontend / PDF report compatibility
+    # Flat risk fields for frontend / PDF compatibility
     risk = result.get("risk", {})
     result["risk_score"] = risk.get("score", 0)
     result["risk_level"] = _score_to_level(risk.get("score", 0))
@@ -125,10 +182,8 @@ async def recon(domain: str):
     result["risk_issues"] = [i["issue"] for i in risk.get("risk_issues", [])]
     result["recommendations"] = _build_recommendations(risk.get("risk_issues", []))
 
-    # Historical correlation
     result["history_correlation"] = get_scan_history(target)
 
-    # Persist and cache
     save_scan(target, result)
     scan_cache.set(target, result)
 
@@ -148,7 +203,6 @@ async def report(domain: str):
     except HardFailError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Try cache → DB → fresh scan
     data = scan_cache.get(target) or get_scan_data(target)
 
     if not data:
@@ -180,78 +234,75 @@ async def report(domain: str):
 
 
 # ---------------------------------------------------------------------------
-# Module execution plan
-# ---------------------------------------------------------------------------
-# Each entry: (module_key, callable, positional_args, timeout_seconds)
-# Timeout is enforced per-module — slow modules fail gracefully.
-
-_MODULE_TIMEOUT = 45   # seconds per module before it's marked as timed out
-
-
-def _build_module_plan(target: str) -> List[tuple]:
-    """Return the ordered module execution plan for a scan."""
-    return [
-        ("infrastructure",   get_infrastructure,   (target,), 25),
-        ("dns",              get_dns_records,       (target,), 20),
-        ("fingerprint",      fingerprint_target,    (target,), 15),
-        ("ssl_certificate",  get_ssl_certificate,   (target,), 20),
-        ("subdomains",       discover_subdomains,   (target,), 60),
-        ("wayback",          query_wayback,          (target,), 30),
-        ("whois",            get_whois,              (target,), 20),
-        ("technology",       detect_technology,      (target,), 20),
-    ]
-
-
-# ---------------------------------------------------------------------------
 # Concurrent executor
 # ---------------------------------------------------------------------------
 
-def _run_modules_concurrently(target: str) -> Dict[str, Any]:
+def _run_modules_concurrently(target: str) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, float]]:
     """
-    Execute all scan modules in parallel using a thread pool.
-    Each module runs independently; failures are isolated and logged.
+    Execute all registered modules in parallel.
 
-    Returns dict mapping module_key → result (or error dict on failure).
+    Returns:
+        results       — module_key → result dict
+        module_status — module_key → {status, reason, available}
+        module_timings — module_key → elapsed_seconds
     """
-    plan = _build_module_plan(target)
     results: Dict[str, Any] = {}
+    module_status: Dict[str, Any] = {}
     module_timings: Dict[str, float] = {}
 
-    # Map future → (key, timeout)
-    future_map = {}
+    max_timeout = max(m.timeout_seconds for m in MODULE_REGISTRY) + MODULE_TIMEOUT_BUFFER
 
-    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="corerecon") as executor:
-        for key, fn, args, timeout in plan:
-            future = executor.submit(fn, *args)
-            future_map[future] = (key, timeout)
+    with ThreadPoolExecutor(max_workers=len(MODULE_REGISTRY), thread_name_prefix="cr") as executor:
+        future_map: Dict[Any, ModuleSpec] = {}
 
-        for future in as_completed(future_map, timeout=_MODULE_TIMEOUT + 10):
-            key, per_module_timeout = future_map[future]
+        for spec in MODULE_REGISTRY:
+            if not spec.is_available():
+                results[spec.key] = {"error": f"Module '{spec.key}' not available — import failed"}
+                module_status[spec.key] = {"status": "UNAVAILABLE", "reason": "Import failed", "available": False}
+                module_timings[spec.key] = 0
+                continue
+            future = executor.submit(spec.fn, target)
+            future_map[future] = spec
+
+        for future in as_completed(future_map, timeout=max_timeout):
+            spec = future_map[future]
             t_start = time.monotonic()
 
             try:
-                result = future.result(timeout=per_module_timeout)
-                elapsed = time.monotonic() - t_start
-                results[key] = result
-                module_timings[key] = round(elapsed, 2)
-                log.debug(f"Module '{key}' completed in {elapsed:.2f}s")
+                result = future.result(timeout=spec.timeout_seconds)
+                elapsed = round(time.monotonic() - t_start, 2)
+                results[spec.key] = result
+                module_status[spec.key] = {"status": "OK", "reason": None, "available": True}
+                module_timings[spec.key] = elapsed
+                log.debug(f"Module '{spec.key}' OK in {elapsed}s")
 
             except FuturesTimeoutError:
-                results[key] = {"error": f"Module timed out after {per_module_timeout}s"}
-                module_timings[key] = per_module_timeout
-                log.warning(f"Module '{key}' timed out")
+                elapsed = round(spec.timeout_seconds, 2)
+                results[spec.key] = {"error": f"Timed out after {spec.timeout_seconds}s"}
+                module_status[spec.key] = {
+                    "status": "TIMEOUT",
+                    "reason": f"Exceeded {spec.timeout_seconds}s timeout",
+                    "available": True,
+                }
+                module_timings[spec.key] = elapsed
+                log.warning(f"Module '{spec.key}' timed out")
 
             except Exception as exc:
-                results[key] = {"error": str(exc)}
-                module_timings[key] = round(time.monotonic() - t_start, 2)
-                log.error(f"Module '{key}' failed: {exc}")
+                elapsed = round(time.monotonic() - t_start, 2)
+                results[spec.key] = {"error": str(exc)}
+                module_status[spec.key] = {
+                    "status": "SOFT_FAIL",
+                    "reason": str(exc)[:200],
+                    "available": True,
+                }
+                module_timings[spec.key] = elapsed
+                log.error(f"Module '{spec.key}' failed: {exc}")
 
-    results["_module_timings"] = module_timings
-    return results
+    return results, module_status, module_timings
 
 
 # ---------------------------------------------------------------------------
-# Executive summary generator (Phase 7)
+# Executive summary generator
 # ---------------------------------------------------------------------------
 
 def _generate_executive_summary(
@@ -264,83 +315,56 @@ def _generate_executive_summary(
     correlations: List[Dict],
     asset_classification: List[Dict],
 ) -> Dict[str, Any]:
-    """
-    Generate a deterministic, data-driven executive summary.
-    All content is derived from actual scan findings — no generic placeholder text.
-    """
+    """Generate a deterministic, data-driven executive summary."""
     score = risk.get("score", 0)
     grade = risk.get("grade", "F")
     risk_issues = risk.get("risk_issues", [])
 
-    # --- Key risks (top 3 by severity) ---
-    key_risks = []
-    for issue in risk_issues[:3]:
-        key_risks.append({
-            "finding": issue.get("issue", ""),
-            "severity": issue.get("severity", ""),
-            "category": issue.get("category", ""),
-        })
+    key_risks = [
+        {"finding": i.get("issue", ""), "severity": i.get("severity", ""), "category": i.get("category", "")}
+        for i in risk_issues[:3]
+    ]
 
-    # --- Exposed assets summary (top 3) ---
-    top_exposed = []
-    for asset in exposed_assets[:3]:
-        top_exposed.append({
-            "hostname": asset.get("hostname", ""),
-            "type": asset.get("exposure_type", ""),
-            "severity": asset.get("severity", ""),
-            "reason": asset.get("risk_reason", ""),
-        })
+    top_exposed = [
+        {
+            "hostname": a.get("hostname", ""),
+            "type": a.get("exposure_type", ""),
+            "severity": a.get("severity", ""),
+            "reason": a.get("risk_reason", ""),
+        }
+        for a in exposed_assets[:3]
+    ]
 
-    # --- Infrastructure observations ---
     infra_observations = []
-    if infrastructure:
-        if infrastructure.get("online"):
-            cdn = infrastructure.get("cdn", {})
-            if cdn.get("detected"):
-                infra_observations.append(
-                    f"Traffic is routed through {cdn.get('provider', 'a CDN')} — origin IP is shielded."
-                )
-            else:
-                ip = infrastructure.get("ip", "unknown")
-                infra_observations.append(
-                    f"No CDN detected — origin server ({ip}) is directly internet-accessible."
-                )
-            if infrastructure.get("cloud_provider"):
-                infra_observations.append(
-                    f"Hosted on {infrastructure['cloud_provider']}."
-                )
-            open_ports = infrastructure.get("open_ports", [])
-            if open_ports:
-                risky = [p for p in open_ports if p in {21, 23, 3306, 5432, 6379, 27017, 3389, 5900}]
-                if risky:
-                    infra_observations.append(
-                        f"{len(risky)} high-risk port(s) open: {', '.join(str(p) for p in risky[:5])}."
-                    )
-        else:
-            infra_observations.append("Target appears to be offline or DNS resolution failed.")
+    if infrastructure and not infrastructure.get("error"):
+        cdn = infrastructure.get("cdn", {})
+        if cdn.get("detected"):
+            infra_observations.append(f"Traffic routed through {cdn.get('provider', 'a CDN')} — origin IP is shielded.")
+        elif infrastructure.get("online"):
+            infra_observations.append(f"No CDN detected — origin ({infrastructure.get('ip', 'unknown')}) is directly exposed.")
+        if infrastructure.get("cloud_provider"):
+            infra_observations.append(f"Hosted on {infrastructure['cloud_provider']}.")
+        risky = [p for p in infrastructure.get("open_ports", []) if p in {21, 23, 3306, 5432, 6379, 27017, 3389, 5900}]
+        if risky:
+            infra_observations.append(f"{len(risky)} high-risk port(s) open: {', '.join(str(p) for p in risky[:5])}.")
 
-    # --- DNS security assessment ---
     dns_assessment = []
     if dns:
         spf = dns.get("spf", {})
         dmarc = dns.get("dmarc", {})
-        dnssec = dns.get("dnssec", False)
-
         if spf.get("present") and dmarc.get("present") and dmarc.get("policy") in ("quarantine", "reject"):
-            dns_assessment.append("Email authentication is properly configured (SPF + DMARC enforced).")
+            dns_assessment.append("Email authentication properly configured (SPF + DMARC enforced).")
         elif not spf.get("present") and not dmarc.get("present"):
-            dns_assessment.append("No email authentication — domain is freely spoofable for phishing attacks.")
+            dns_assessment.append("No email authentication — domain freely spoofable for phishing.")
         elif not dmarc.get("present"):
-            dns_assessment.append("SPF is present but DMARC is missing — email From-header spoofing remains possible.")
+            dns_assessment.append("SPF present but DMARC absent — From-header spoofing still possible.")
         elif dmarc.get("policy") == "none":
-            dns_assessment.append("DMARC is in monitor-only mode — email spoofing is not actively blocked.")
-
-        if dnssec:
-            dns_assessment.append("DNSSEC is enabled — DNS responses are cryptographically signed.")
+            dns_assessment.append("DMARC in monitor-only mode — email spoofing not actively blocked.")
+        if dns.get("dnssec", {}).get("enabled"):
+            dns_assessment.append("DNSSEC enabled — DNS responses cryptographically signed.")
         else:
-            dns_assessment.append("DNSSEC is not enabled — DNS responses cannot be authenticated by resolvers.")
+            dns_assessment.append("DNSSEC not enabled — DNS responses cannot be authenticated.")
 
-    # --- Subdomain exposure summary ---
     sub_summary = None
     if subdomains:
         total = subdomains.get("total_found", 0)
@@ -352,45 +376,28 @@ def _generate_executive_summary(
                 "sample_high_risk": [s["subdomain"] for s in high_risk[:3]],
             }
 
-    # --- Asset inventory highlight ---
-    critical_asset_types = [
-        a for a in asset_classification
+    critical_assets = [
+        {"hostname": a["hostname"], "asset_type": a["asset_type"]}
+        for a in asset_classification
         if a.get("risk_weight", 0) >= 85 and not a.get("is_root")
-    ]
+    ][:5]
 
-    # --- Security posture narrative ---
     if score >= 80:
-        posture = (
-            f"{target} demonstrates a strong security posture (score {score}/100, grade {grade}). "
-            "Key controls are in place. Address remaining findings to reach optimal posture."
-        )
+        posture = (f"{target} demonstrates a strong security posture (score {score}/100, grade {grade}). "
+                   "Address remaining findings to reach optimal posture.")
     elif score >= 60:
-        posture = (
-            f"{target} has a moderate security posture (score {score}/100, grade {grade}). "
-            f"Several significant gaps were identified across {len(key_risks)} risk area(s) "
-            "that should be prioritised for remediation."
-        )
+        posture = (f"{target} has a moderate security posture (score {score}/100, grade {grade}). "
+                   f"Several gaps across {len(key_risks)} risk area(s) should be prioritised.")
     elif score >= 40:
-        posture = (
-            f"{target} has a weak security posture (score {score}/100, grade {grade}). "
-            f"Multiple high-severity issues were found. Immediate remediation is recommended "
-            f"for the {len([r for r in risk_issues if r.get('severity') in ('CRITICAL', 'HIGH')])} "
-            "critical and high severity findings."
-        )
+        posture = (f"{target} has a weak security posture (score {score}/100, grade {grade}). "
+                   f"Immediate remediation recommended for "
+                   f"{len([r for r in risk_issues if r.get('severity') in ('CRITICAL','HIGH')])} critical/high findings.")
     else:
-        posture = (
-            f"{target} has a critically weak security posture (score {score}/100, grade {grade}). "
-            "Multiple critical and high severity issues across TLS, email security, and exposure "
-            "were found. Urgent remediation required."
-        )
+        posture = (f"{target} has a critically weak security posture (score {score}/100, grade {grade}). "
+                   "Urgent remediation required across TLS, email security, and exposure.")
 
-    # --- Correlation highlights ---
     top_correlations = [
-        {
-            "type": c.get("correlation_type"),
-            "description": c.get("description"),
-            "severity": c.get("severity"),
-        }
+        {"type": c.get("correlation_type"), "description": c.get("description"), "severity": c.get("severity")}
         for c in correlations[:3]
         if c.get("severity") in ("CRITICAL", "HIGH")
     ]
@@ -404,10 +411,7 @@ def _generate_executive_summary(
         "infrastructure_observations": infra_observations,
         "dns_security_assessment": dns_assessment,
         "subdomain_exposure": sub_summary,
-        "high_risk_asset_types": [
-            {"hostname": a["hostname"], "asset_type": a["asset_type"]}
-            for a in critical_asset_types[:5]
-        ],
+        "high_risk_asset_types": critical_assets,
         "intelligence_highlights": top_correlations,
     }
 
@@ -417,35 +421,23 @@ def _generate_executive_summary(
 # ---------------------------------------------------------------------------
 
 def run_scan(target: str) -> Dict[str, Any]:
-    """
-    Execute a full CoreRecon passive scan against target.
-
-    Parameters
-    ----------
-    target : str
-        Domain name to scan (e.g. "example.com").
-
-    Returns
-    -------
-    Comprehensive scan result dict ready for API serialisation.
-    """
+    """Execute a full CoreRecon passive scan against target."""
     scan_start = time.monotonic()
     log.info("Scan started", extra={"target": target})
 
-    # --- Phase 6: Concurrent module execution ---
-    module_results = _run_modules_concurrently(target)
-    module_timings = module_results.pop("_module_timings", {})
+    # Phase 1: Concurrent module execution
+    module_results, module_status, module_timings = _run_modules_concurrently(target)
 
-    infrastructure   = module_results.get("infrastructure",  {}) or {}
-    dns              = module_results.get("dns",              {}) or {}
-    fingerprint      = module_results.get("fingerprint",      {}) or {}
-    ssl_certificate  = module_results.get("ssl_certificate",  {}) or {}
-    subdomains       = module_results.get("subdomains",       {}) or {}
-    wayback          = module_results.get("wayback",          {}) or {}
-    whois            = module_results.get("whois",            {}) or {}
-    technology       = module_results.get("technology",       {}) or {}
+    infrastructure  = module_results.get("infrastructure",  {}) or {}
+    dns             = module_results.get("dns",              {}) or {}
+    fingerprint     = module_results.get("fingerprint",      {}) or {}
+    ssl_certificate = module_results.get("ssl_certificate",  {}) or {}
+    subdomains      = module_results.get("subdomains",       {}) or {}
+    wayback         = module_results.get("wayback",          {}) or {}
+    whois           = module_results.get("whois",            {}) or {}
+    technology      = module_results.get("technology",       {}) or {}
 
-    # --- Phase 3: Exposure detection ---
+    # Phase 2: Exposure detection
     all_subdomain_names = subdomains.get("subdomains", [])
     wayback_subs = wayback.get("subdomains_discovered", [])
     combined_subs = list(set(all_subdomain_names + wayback_subs))
@@ -453,10 +445,10 @@ def run_scan(target: str) -> Dict[str, Any]:
     exposed_assets = detect_exposed_assets(combined_subs, target)
     exposure_summary = summarise_exposure(exposed_assets)
 
-    # --- Phase 2: Asset classification ---
+    # Phase 3: Asset classification
     asset_classification = classify_assets(combined_subs, target)
 
-    # --- Phase 5: Risk scoring ---
+    # Phase 4: Risk scoring
     risk = calculate_risk_score(
         ssl=ssl_certificate,
         fingerprint=fingerprint,
@@ -467,8 +459,8 @@ def run_scan(target: str) -> Dict[str, Any]:
         exposed_assets=exposed_assets,
     )
 
-    # Build intermediate scan_data dict for correlation
-    scan_data_for_correlation = {
+    # Phase 5: Intelligence correlations
+    correlations = correlate_intelligence({
         "target": target,
         "dns": dns,
         "infrastructure": infrastructure,
@@ -476,12 +468,9 @@ def run_scan(target: str) -> Dict[str, Any]:
         "subdomains": subdomains,
         "fingerprint": fingerprint,
         "technology": technology,
-    }
+    })
 
-    # --- Phase 1: Intelligence correlations ---
-    correlations = correlate_intelligence(scan_data_for_correlation)
-
-    # --- Phase 7: Executive summary ---
+    # Phase 6: Executive summary
     executive_summary = _generate_executive_summary(
         target=target,
         risk=risk,
@@ -503,15 +492,16 @@ def run_scan(target: str) -> Dict[str, Any]:
             "risk_score": risk.get("score"),
             "correlations": len(correlations),
             "exposed_assets": len(exposed_assets),
+            "module_statuses": {k: v["status"] for k, v in module_status.items()},
         },
     )
 
     return {
-        # Core identity
+        # Identity
         "target": target,
         "scan_duration_seconds": scan_duration,
 
-        # Module results (v2.0 compatible fields preserved)
+        # Module results (v2.0+ compatible)
         "infrastructure":  infrastructure,
         "dns":             dns,
         "fingerprint":     fingerprint,
@@ -521,16 +511,17 @@ def run_scan(target: str) -> Dict[str, Any]:
         "whois":           whois,
         "technology":      technology,
 
-        # v2.1 intelligence fields
-        "risk":                  risk,
-        "exposed_assets":        exposed_assets,
-        "exposure_summary":      exposure_summary,
-        "asset_classification":  asset_classification,
+        # Intelligence layers
+        "risk":                      risk,
+        "exposed_assets":            exposed_assets,
+        "exposure_summary":          exposure_summary,
+        "asset_classification":      asset_classification,
         "intelligence_correlations": correlations,
-        "executive_summary":     executive_summary,
+        "executive_summary":         executive_summary,
 
-        # Diagnostics
-        "module_timings":        module_timings,
+        # Diagnostics — now always populated with real status
+        "module_timings":  module_timings,
+        "module_status":   module_status,
     }
 
 
@@ -539,38 +530,33 @@ def run_scan(target: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _score_to_level(score: int) -> str:
-    if score >= 85:
-        return "MINIMAL"
-    if score >= 65:
-        return "LOW"
-    if score >= 40:
-        return "MEDIUM"
-    if score >= 20:
-        return "HIGH"
+    if score >= 85: return "MINIMAL"
+    if score >= 65: return "LOW"
+    if score >= 40: return "MEDIUM"
+    if score >= 20: return "HIGH"
     return "CRITICAL"
 
 
 def _risk_status_text(target: str, score: int) -> str:
     level = _score_to_level(score)
-    messages = {
-        "MINIMAL": f"{target} demonstrates strong security hygiene. Few actionable findings detected.",
-        "LOW": f"{target} has a generally healthy posture with minor improvements recommended.",
-        "MEDIUM": f"{target} has several security gaps that should be addressed to reduce exposure.",
-        "HIGH": f"{target} has significant vulnerabilities. Remediation is strongly recommended.",
+    return {
+        "MINIMAL":  f"{target} demonstrates strong security hygiene. Few actionable findings.",
+        "LOW":      f"{target} has a generally healthy posture with minor improvements recommended.",
+        "MEDIUM":   f"{target} has several security gaps that should be addressed.",
+        "HIGH":     f"{target} has significant vulnerabilities. Remediation strongly recommended.",
         "CRITICAL": f"{target} has critical security weaknesses requiring immediate attention.",
-    }
-    return messages.get(level, "Assessment complete.")
+    }.get(level, "Assessment complete.")
 
 
 def _build_recommendations(risk_issues: list) -> list:
     recs, seen = [], set()
     priority_map = {
-        "tls": "Upgrade TLS configuration to TLS 1.3 and ensure certificate validity.",
-        "web_security": "Implement HSTS, CSP, X-Frame-Options, and other security headers.",
-        "dns": "Configure SPF, DMARC (quarantine/reject policy), and enable DNSSEC.",
-        "infrastructure": "Consider placing origin behind a CDN and close unnecessary exposed ports.",
-        "technology": "Update all software components to current supported versions.",
-        "exposure": "Review and restrict public access to sensitive subdomains and services.",
+        "tls":            "Upgrade TLS to 1.3 and ensure certificate validity.",
+        "web_security":   "Implement HSTS, CSP, X-Frame-Options, and other security headers.",
+        "dns":            "Configure SPF, DMARC (quarantine/reject), and enable DNSSEC.",
+        "infrastructure": "Consider CDN placement and close unnecessary exposed ports.",
+        "technology":     "Update all software to current supported versions.",
+        "exposure":       "Review and restrict public access to sensitive subdomains.",
     }
     for issue in risk_issues:
         cat = issue.get("category", "")
