@@ -153,6 +153,47 @@ app = FastAPI(title="CoreRecon API", version="2.2.1")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# ── Request body size limit ──────────────────────────────────────────────────
+# Prevents memory exhaustion from oversized payloads.
+# CoreRecon is a GET-only API so legitimate bodies are always tiny.
+# 16 KB is generous; a domain name is never more than 253 bytes.
+@app.middleware("http")
+async def limit_request_size(request: Request, call_next):
+    max_body = 16_384  # 16 KB
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > max_body:
+        return JSONResponse(
+            status_code=413,
+            content={"detail": "Request body too large"},
+        )
+    # Stream-check for chunked transfers that omit Content-Length
+    body = b""
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > max_body:
+            return JSONResponse(
+                status_code=413,
+                content={"detail": "Request body too large"},
+            )
+    return await call_next(request)
+
+
+# ── Security response headers ────────────────────────────────────────────────
+# Adds hardened headers to every API response.
+# Mirrors what the scanner checks on target sites.
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"]  = "nosniff"
+    response.headers["X-Frame-Options"]         = "DENY"
+    response.headers["Referrer-Policy"]         = "no-referrer"
+    response.headers["X-XSS-Protection"]        = "0"          # modern browsers: CSP handles this
+    response.headers["Permissions-Policy"]      = "geolocation=(), camera=(), microphone=()"
+    response.headers["Cache-Control"]           = "no-store"
+    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    return response
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
