@@ -998,17 +998,19 @@ export default function App() {
               {/* Correlations */}
               <CorrelationsPanel correlations={data.intelligence_correlations} />
 
-              {/* 2-col grid for detail panels */}
+              {/* 2-col grid for detail panels — keep even items to avoid blank cells */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                 <ExposedAssetsPanel assets={data.exposed_assets} summary={data.exposure_summary} />
                 <RecommendationsPanel recommendations={data.recommendations} riskIssues={data.risk_issues} />
                 <DnsPanel dns={data.dns} />
                 <TlsPanel ssl={data.ssl_certificate} />
-                <SubdomainList subdomains={data.subdomains} />
               </div>
 
               {/* Tech stack — full width, categorized */}
               <TechnologyStack technology={data.technology} />
+
+              {/* Subdomains — full width, can be very long */}
+              <SubdomainList subdomains={data.subdomains} />
 
               {/* WHOIS */}
               {data.whois && !data.whois.error && (
