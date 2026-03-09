@@ -16,8 +16,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 import urllib3
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 from backend.core.logger import get_logger
 
 log = get_logger("corerecon.technology")
@@ -710,7 +708,14 @@ _MUTEX_GROUPS = [
 
 
 def _fetch_page(domain: str):
-    """Fetch the target's homepage, trying HTTPS then HTTP. Returns (response, html)."""
+    """
+    Fetch the target homepage, trying HTTPS then HTTP.
+    Uses verify=True (system CA bundle) first. If the target has an invalid
+    or self-signed certificate, falls back to verify=False so technology
+    detection still works — the cert state is already reported by
+    certificates.py; this module's job is to read page content.
+    Returns (response, html).
+    """
     for scheme in ("https", "http"):
         url = f"{scheme}://{domain}"
         try:
@@ -719,11 +724,34 @@ def _fetch_page(domain: str):
                 timeout=REQUEST_TIMEOUT,
                 allow_redirects=True,
                 headers={"User-Agent": "Mozilla/5.0 (compatible; CoreRecon/3.0)"},
-                verify=False,
+                verify=True,   # system CA bundle — validates our outbound TLS
             )
             return resp, resp.text
+
+        except requests.exceptions.SSLError:
+            # Target has a bad/self-signed cert. Fall back to unverified so
+            # we can still fingerprint its technology stack.
+            log.warning(
+                "SSL verification failed — falling back to unverified fetch for tech detection",
+                extra={"url": url},
+            )
+            try:
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                resp = requests.get(
+                    url,
+                    timeout=REQUEST_TIMEOUT,
+                    allow_redirects=True,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; CoreRecon/3.0)"},
+                    verify=False,
+                )
+                urllib3.warnings.resetwarnings()
+                return resp, resp.text
+            except Exception as exc:
+                log.warning(f"Unverified fetch also failed ({scheme}): {exc}")
+
         except Exception as exc:
             log.warning(f"Fetch failed ({scheme}): {exc}")
+
     return None, ""
 
 
