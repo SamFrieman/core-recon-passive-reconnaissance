@@ -524,7 +524,7 @@ def generate_pdf_report(data: dict) -> bytes:
             bg = C_ROWEVEN if (i // 2) % 2 == 0 else C_ROWODD
             pdf.set_fill_color(*bg)
             pdf.rect(10, y0, 190, 4, "F")
-            pdf.set_xy(12, y0)
+            pdf.set_xy(10, y0)
             pdf.cell(95, 4, st(f"  {shown[i]}"), ln=False)
             if i + 1 < len(shown):
                 pdf.cell(95, 4, st(f"  {shown[i+1]}"), ln=True)
@@ -567,7 +567,7 @@ def generate_pdf_report(data: dict) -> bytes:
                 bg = C_ROWEVEN if (i // 2) % 2 == 0 else C_ROWODD
                 pdf.set_fill_color(*bg)
                 pdf.rect(10, y0, 190, 4, "F")
-                pdf.set_xy(12, y0)
+                pdf.set_xy(10, y0)
                 pdf.cell(95, 4, st(f"> {ns_list[i]}"), ln=False)
                 if i + 1 < len(ns_list):
                     pdf.cell(95, 4, st(f"> {ns_list[i+1]}"), ln=True)
@@ -624,12 +624,12 @@ def generate_pdf_report(data: dict) -> bytes:
                     eol_note = item.get("eol_note", "")
                     y0 = pdf.get_y()
                     pdf.rect(10, y0, 190, 4.5, "F")
-                    pdf.set_xy(12, y0 + 0.5)
+                    pdf.set_xy(10, y0 + 0.5)
                     pdf.set_text_color(*C_VALUE)
-                    pdf.cell(100, 3.5, st(name), ln=False)
+                    pdf.cell(98, 3.5, st(name), ln=False)
                     pdf.set_font("Courier", "", 6.5)
                     pdf.set_text_color(*C_SECTION if ver else C_LABEL)
-                    pdf.cell(40, 3.5, st(ver if ver else "-"), ln=False, align="C")
+                    pdf.cell(42, 3.5, st(ver if ver else "-"), ln=False, align="C")
                     pdf.set_font("Arial", "", 7)
                     if eol == "HIGH":
                         pdf.set_text_color(*C_DANGER)
@@ -645,9 +645,9 @@ def generate_pdf_report(data: dict) -> bytes:
                         pdf.cell(50, 3.5, "-", ln=True, align="C")
                 else:
                     pdf.rect(10, pdf.get_y(), 190, 4.5, "F")
-                    pdf.set_xy(12, pdf.get_y() + 0.5)
+                    pdf.set_xy(10, pdf.get_y() + 0.5)
                     pdf.set_text_color(*C_VALUE)
-                    pdf.cell(0, 3.5, st(str(item)), ln=True)
+                    pdf.cell(190, 3.5, st(str(item)), ln=True)
             if len(items) > 20:
                 pdf.set_font("Arial", "I", 7)
                 pdf.set_text_color(*C_LABEL)
