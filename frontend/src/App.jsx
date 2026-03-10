@@ -247,7 +247,7 @@ function ModulePipeline({ moduleStatus, moduleTimings, scanning }) {
 }
 
 /* Risk gauge — score=100 is best (green), score=0 is critical (red) */
-function RiskGauge({ score, level }) {
+function RiskGauge({ score, level, grade }) {
   const pct = score; // higher = better = more fill
   const trackColor = {
     MINIMAL:  "var(--green)",
