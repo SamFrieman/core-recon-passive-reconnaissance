@@ -877,7 +877,7 @@ def get_technology_stack(domain: str) -> Dict[str, Any]:
             detections.append({
                 "category": rule["category"],
                 "name": name,
-                "version": version if version else "Detected",
+                "version": version if version is not None else "",
                 "eol_risk": eol["eol_risk"],
                 "eol_note": eol["eol_note"],
             })
