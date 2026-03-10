@@ -649,6 +649,11 @@ def generate_pdf_report(data: dict) -> bytes:
                 if isinstance(item, dict):
                     name = item.get("name", "Unknown")
                     ver  = item.get("version", "") or ""
+                    # Scrub non-version placeholder strings the scanner emits
+                    # when it detects a technology but can't resolve the version
+                    _VER_PLACEHOLDERS = {"detected", "unknown", "n/a", "yes", "true", "present", "found", "-"}
+                    if ver.strip().lower() in _VER_PLACEHOLDERS:
+                        ver = ""
                     eol  = item.get("eol_risk", "")
                     eol_note = item.get("eol_note", "")
                     y0 = pdf.get_y()
