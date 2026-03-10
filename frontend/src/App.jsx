@@ -958,7 +958,7 @@ export default function App() {
                     <span style={{ color: "var(--text-dim)" }}>◈</span>
                     <span className="label">Risk Score</span>
                   </div>
-                  <RiskGauge score={riskScore} level={riskLevel} />
+                  <RiskGauge score={riskScore} level={riskLevel} grade={data.risk?.grade} />
                   {data.scan_duration_seconds && (
                     <div style={{ padding: "0 14px 10px", fontSize: 9, color: "var(--text-dim)" }}>
                       Scan completed in {data.scan_duration_seconds}s
