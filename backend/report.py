@@ -1,14 +1,12 @@
 """
 CoreRecon v2.3 - PDF Report Generator
-Improvements over v2.2:
-  - Flow-based layout (no forced page-per-section)
-  - Two-column key/value pairs - far less whitespace
-  - Compact section headers (coloured left-border style, no full dark bar)
-  - Sections only start a new page when < 40 mm remain
-  - Table of contents on page 2
-  - Subdomains rendered in 3-column grid
-  - DNS records in 2-column grid
-  - Better typography hierarchy
+
+Fixes vs v2.3 original:
+  - st() now handles em dash, en dash, smart quotes (were rendering as ?)
+  - sub_count uses total_found (was using non-existent 'count' key — showed 0)
+  - Infrastructure badge uses infra.get("online") (was checking non-existent 'status' key)
+  - Subdomain list switched to 2-column layout with 42-char labels (was 3-col/26-char, truncated mid-word)
+  - Stats section subdomain count fixed to match corrected sub_count
 """
 from datetime import datetime
 from fpdf import FPDF
@@ -60,7 +58,22 @@ def generate_pdf_report(data: dict) -> bytes:
     pdf.set_auto_page_break(auto=True, margin=18)
 
     def st(text):
-        return str(text).encode("latin-1", "replace").decode("latin-1")
+        """
+        Convert text to latin-1 safe string.
+        Replaces common unicode characters that have no latin-1 equivalent
+        rather than letting encode(..., 'replace') silently drop them as '?'.
+        """
+        s = str(text)
+        s = s.replace('\u2014', ' - ')    # em dash —
+        s = s.replace('\u2013', ' - ')    # en dash –
+        s = s.replace('\u2019', "'")      # right single quotation mark '
+        s = s.replace('\u2018', "'")      # left single quotation mark '
+        s = s.replace('\u201c', '"')      # left double quotation mark "
+        s = s.replace('\u201d', '"')      # right double quotation mark "
+        s = s.replace('\u2022', '*')      # bullet •
+        s = s.replace('\u00b7', '.')      # middle dot
+        s = s.replace('\u2026', '...')    # ellipsis …
+        return s.encode("latin-1", "replace").decode("latin-1")
 
     def need_space(mm=40):
         if pdf.get_y() > (297 - 18 - mm):
@@ -114,11 +127,11 @@ def generate_pdf_report(data: dict) -> bytes:
         pdf.set_x(10)
         pdf.set_font("Arial", "B", 7.5)
         pdf.set_text_color(*C_LABEL)
-        pdf.cell(35, 5, st(key + ":"), ln=False)   # x -> 45
-        pdf.set_x(45)                               # explicit reset in case auto-break shifted x
+        pdf.cell(35, 5, st(key + ":"), ln=False)
+        pdf.set_x(45)
         pdf.set_font("Arial", "", 7.5)
         pdf.set_text_color(*(color if color else C_VALUE))
-        pdf.multi_cell(150, 5, st(str(val)))        # 45+150=195, never reaches right margin
+        pdf.multi_cell(150, 5, st(str(val)))
         pdf.set_text_color(*C_VALUE)
 
     def badge(text, r, g, b):
@@ -139,7 +152,7 @@ def generate_pdf_report(data: dict) -> bytes:
         pdf.ln(3)
 
     def safe_mc(txt, h=4.5):
-        """multi_cell that ALWAYS resets x to left margin first - prevents x-drift crashes."""
+        """multi_cell that ALWAYS resets x to left margin first."""
         pdf.set_x(pdf.l_margin)
         pdf.multi_cell(190, h, txt)
 
@@ -286,11 +299,11 @@ def generate_pdf_report(data: dict) -> bytes:
             pdf.set_xy(13, y0 + 2)
             pdf.set_font("Arial", "B", 8)
             pdf.set_text_color(*C_DANGER)
-            pdf.cell(7, 4, f"{i}.", ln=False)   # x -> 20
-            pdf.set_x(20)                        # explicit guard
+            pdf.cell(7, 4, f"{i}.", ln=False)
+            pdf.set_x(20)
             pdf.set_font("Arial", "", 8)
             pdf.set_text_color(*C_VALUE)
-            pdf.multi_cell(173, 4.5, st(issue))  # 20+173=193
+            pdf.multi_cell(173, 4.5, st(issue))
     else:
         pdf.set_fill_color(240, 252, 244)
         pdf.rect(10, pdf.get_y(), 190, 8, "F")
@@ -315,11 +328,11 @@ def generate_pdf_report(data: dict) -> bytes:
             pdf.set_xy(13, y0 + 2)
             pdf.set_font("Arial", "B", 8)
             pdf.set_text_color(*C_SECTION)
-            pdf.cell(7, 4, f"{i}.", ln=False)   # x -> 20
-            pdf.set_x(20)                        # explicit guard
+            pdf.cell(7, 4, f"{i}.", ln=False)
+            pdf.set_x(20)
             pdf.set_font("Arial", "", 8)
             pdf.set_text_color(*C_VALUE)
-            pdf.multi_cell(173, 4.5, st(rec))    # 20+173=193
+            pdf.multi_cell(173, 4.5, st(rec))
         if len(recommendations) > 6:
             pdf.set_font("Arial", "I", 7)
             pdf.set_text_color(*C_LABEL)
@@ -365,11 +378,15 @@ def generate_pdf_report(data: dict) -> bytes:
     section("01. INFRASTRUCTURE & NETWORK INTELLIGENCE", f"Primary host analysis for {st(target)}")
 
     infra = _as_dict(data.get("infrastructure"))
-    status_txt = infra.get("status", "UNKNOWN")
-    if status_txt == "ONLINE":
+
+    # FIX: infrastructure module returns online:bool, not status:str
+    is_online = infra.get("online", False) or infra.get("status", "") == "ONLINE"
+    if is_online:
         badge("ONLINE", *C_SUCCESS)
+    elif infra.get("error"):
+        badge("UNREACHABLE", *C_DANGER)
     else:
-        badge(status_txt, *C_DANGER)
+        badge("OFFLINE", *C_DANGER)
     pdf.ln(7)
 
     asn = infra.get("asn")
@@ -385,13 +402,13 @@ def generate_pdf_report(data: dict) -> bytes:
         ("IP Address",     infra.get("ip", "")),
         ("Reverse DNS",    infra.get("reverse_dns", "")),
         ("ISP / Provider", infra.get("provider", infra.get("isp", ""))),
-        ("Organization",   infra.get("organization", "")),
+        ("Organization",   infra.get("organization", infra.get("org", ""))),
         ("ASN Number",     asn_num),
         ("ASN Org",        asn_org),
         ("City",           loc.get("city", "")),
         ("Region",         loc.get("region", "")),
-        ("Country",        loc.get("country", "")),
-        ("Coordinates",    loc.get("coordinates", "")),
+        ("Country",        infra.get("country", loc.get("country", ""))),
+        ("Cloud Provider", infra.get("cloud_provider", "")),
     ])
 
     # ====================================================================
@@ -682,8 +699,9 @@ def generate_pdf_report(data: dict) -> bytes:
     section("07. SUBDOMAIN DISCOVERY & ENUMERATION")
 
     subs = _as_dict(data.get("subdomains"))
-    sub_count = subs.get("count", 0)
-    sub_list  = _as_list(subs.get("subdomains"))
+    sub_list = _as_list(subs.get("subdomains"))
+    # FIX: API returns total_found, not count
+    sub_count = subs.get("total_found", subs.get("count", len(sub_list)))
 
     pdf.set_fill_color(245, 247, 252)
     pdf.rect(10, pdf.get_y(), 190, 8, "F")
@@ -703,22 +721,25 @@ def generate_pdf_report(data: dict) -> bytes:
     if sub_list:
         pdf.set_font("Courier", "", 7)
         pdf.set_text_color(*C_VALUE)
-        shown_subs = sub_list[:90]
-        for i in range(0, len(shown_subs), 3):
+        # FIX: 2-column layout (95mm each, 42-char labels) instead of
+        #      3-column (63mm each, 26-char labels) which truncated mid-word
+        shown_subs = sub_list[:60]
+        for i in range(0, len(shown_subs), 2):
             y0 = pdf.get_y()
-            bg = C_ROWEVEN if (i // 3) % 2 == 0 else C_ROWODD
+            bg = C_ROWEVEN if (i // 2) % 2 == 0 else C_ROWODD
             pdf.set_fill_color(*bg)
             pdf.rect(10, y0, 190, 4, "F")
-            for j in range(3):
+            for j in range(2):
                 idx2 = i + j
                 if idx2 < len(shown_subs):
-                    pdf.set_xy(10 + j * 63, y0)
-                    pdf.cell(63, 4, st(f" {idx2+1}. {shown_subs[idx2]}"[:26]), ln=False)
+                    label = f" {idx2+1}. {shown_subs[idx2]}"
+                    pdf.set_xy(10 + j * 95, y0)
+                    pdf.cell(95, 4, st(label[:42]), ln=False)
             pdf.ln(4)
-        if len(sub_list) > 90:
+        if len(sub_list) > 60:
             pdf.set_font("Arial", "I", 7)
             pdf.set_text_color(*C_LABEL)
-            pdf.cell(0, 4, f"... and {len(sub_list)-90} additional subdomains not shown", ln=True)
+            pdf.cell(0, 4, f"... and {len(sub_list)-60} additional subdomains not shown", ln=True)
     else:
         pdf.set_font("Arial", "", 8)
         pdf.set_text_color(*C_LABEL)
@@ -755,8 +776,8 @@ def generate_pdf_report(data: dict) -> bytes:
         pdf.set_xy(14, pdf.get_y() + 3)
         pdf.set_font("Arial", "", 8)
         pdf.set_text_color(*C_WARN)
-        pdf.set_x(14)                   # explicit guard before multi_cell
-        pdf.multi_cell(176, 4, st(msg)) # 14+176=190
+        pdf.set_x(14)
+        pdf.multi_cell(176, 4, st(msg))
 
     # ====================================================================
     # SECTION 09 - SUMMARY
@@ -795,7 +816,7 @@ def generate_pdf_report(data: dict) -> bytes:
     kv_grid([
         ("Total Issues Found",       len(issues)),
         ("Security Recommendations", len(recommendations)),
-        ("Subdomains Discovered",    sub_count),
+        ("Subdomains Discovered",    sub_count),   # FIX: now uses corrected sub_count
         ("DNS Record Types",         dns_active),
         ("Technologies Identified",  tech_count),
         ("Report Generated",         timestamp),
