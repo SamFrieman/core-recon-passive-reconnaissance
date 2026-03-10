@@ -174,7 +174,8 @@ function scoreGrade(score) {
   if (score >= 75) return "B";
   if (score >= 60) return "C";
   if (score >= 40) return "D";
-  else return "F"
+  return "F";
+}
 
 /* ─── Sub-components (all defined outside App to prevent re-mount) ──────── */
 
@@ -247,8 +248,9 @@ function ModulePipeline({ moduleStatus, moduleTimings, scanning }) {
 }
 
 /* Risk gauge — score=100 is best (green), score=0 is critical (red) */
-function RiskGauge({ score, level, grade }) {
-  const pct = score; // higher = better = more fill
+function RiskGauge({ score, level, grade: backendGrade }) {
+  const pct = score;
+  const grade = backendGrade ?? scoreGrade(score);
   const trackColor = {
     MINIMAL:  "var(--green)",
     LOW:      "var(--blue)",
@@ -256,8 +258,6 @@ function RiskGauge({ score, level, grade }) {
     HIGH:     "#ff8c42",
     CRITICAL: "var(--red)",
   }[level] ?? "var(--amber)";
-
-  const grade = scoreGrade(score);
 
   return (
     <div style={{ padding: "14px", display: "flex", flexDirection: "column", gap: 10 }}>
