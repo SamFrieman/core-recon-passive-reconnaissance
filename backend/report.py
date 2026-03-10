@@ -216,7 +216,6 @@ def generate_pdf_report(data: dict) -> bytes:
     # ====================================================================
     # PAGE 2 - EXECUTIVE SUMMARY
     # ====================================================================
-    pdf.add_page()
     pdf.set_fill_color(255, 255, 255)
 
     pdf.set_font("Arial", "B", 16)
