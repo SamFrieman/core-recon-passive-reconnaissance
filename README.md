@@ -84,3 +84,20 @@ cp .githooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 **v2.0** - Major refactor. Monolithic `main.py` split into `backend/modules/` and `backend/core/`. Risk engine rebuilt with 6 weighted categories (TLS, Web Security, Infrastructure, DNS, Technology, Exposure). Intelligence correlation layer added. In-memory TTL cache added. All print statements replaced with structured JSON logging. PostgreSQL support added alongside SQLite. Per-module soft-fail isolation so one timeout does not abort the full scan.
 
 **v1.0** - Initial release. Infrastructure, DNS, HTTP fingerprinting, TLS, subdomain discovery, WHOIS, technology detection, Wayback Machine history, flat risk scoring, PDF report export.
+
+## Contributing
+
+Pull requests are welcome. A few things to keep in mind:
+
+**Keep it passive.** CoreRecon is a passive reconnaissance tool and will stay that way. PRs that introduce active scanning or exploitation techniques will not be merged.
+
+**Don't break the API.** Existing response fields are stable. Adding new fields is fine, removing or renaming them is not.
+
+**Modules must soft-fail.** If your module hits a timeout or external API error it should return a failure record, not crash the scan. Look at any existing module for the pattern.
+
+**Open an issue first for big changes.** If you're planning something significant, open an issue before writing code so we can align on approach before you invest the time.
+
+**Install the pre-commit hook.** It blocks secrets and sensitive files from being committed. Run this once after cloning:
+```bash
+cp .githooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+```
