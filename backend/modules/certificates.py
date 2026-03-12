@@ -98,7 +98,12 @@ def get_ssl_certificate(domain: str) -> Dict[str, Any]:
       san_count, expiry_risk
     """
     try:
-        ctx = ssl.create_default_context()
+        # Build a dedicated client SSL context with strong protocol guarantees
+        if hasattr(ssl, "PROTOCOL_TLS_CLIENT"):
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        else:
+            # Older Python: fall back to default context but tighten protocol below
+            ctx = ssl.create_default_context()
         # Enforce modern TLS versions only (TLS 1.2+)
         if hasattr(ctx, "minimum_version") and hasattr(ssl, "TLSVersion"):
             ctx.minimum_version = ssl.TLSVersion.TLSv1_2
