@@ -100,7 +100,7 @@ def get_ssl_certificate(domain: str) -> Dict[str, Any]:
     try:
         # Build a dedicated client SSL context with strong protocol guarantees
         if hasattr(ssl, "PROTOCOL_TLS_CLIENT"):
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx = ssl.SSLContext(ssl.Purpose.SERVER_AUTH)
         else:
             # Older Python: fall back to default context but tighten protocol below
             ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
@@ -109,9 +109,11 @@ def get_ssl_certificate(domain: str) -> Dict[str, Any]:
             ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         # Always disable legacy TLS versions when the flags are available
         if hasattr(ssl, "OP_NO_TLSv1"):
+            
             ctx.options |= ssl.OP_NO_TLSv1
         if hasattr(ssl, "OP_NO_TLSv1_1"):
             ctx.options |= ssl.OP_NO_TLSv1_1
+            
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_OPTIONAL
 
