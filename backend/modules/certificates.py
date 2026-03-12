@@ -99,6 +99,15 @@ def get_ssl_certificate(domain: str) -> Dict[str, Any]:
     """
     try:
         ctx = ssl.create_default_context()
+        # Enforce modern TLS versions only (TLS 1.2+)
+        if hasattr(ctx, "minimum_version") and hasattr(ssl, "TLSVersion"):
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        else:
+            # Fallback for older Python: explicitly disable TLS 1.0 and 1.1
+            if hasattr(ssl, "OP_NO_TLSv1"):
+                ctx.options |= ssl.OP_NO_TLSv1
+            if hasattr(ssl, "OP_NO_TLSv1_1"):
+                ctx.options |= ssl.OP_NO_TLSv1_1
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_OPTIONAL
 
