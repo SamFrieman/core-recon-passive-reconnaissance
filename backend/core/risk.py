@@ -10,6 +10,15 @@ v2.1 calibration changes vs v2.0:
   - Self-signed cert penalty now exempts dev/staging subdomains
   - Subdomain exposure count incorporated into exposure score
   - Technology EOL signals weighted higher when high-risk subdomains present
+
+v2.2.2 bugfix:
+  - _score_web_security: fixed key mismatch causing permanent -35 pt penalty.
+    web_headers.py returns hsts_analysis/csp_analysis dicts and a nested
+    security{} dict — not flat hsts/csp/x_frame_options/x_content_type_options
+    keys. Every scan was losing ~35 pts on web_security (25% weight) regardless
+    of actual header configuration, dragging final scores ~8–9 pts below real
+    values and causing consistent D grades on targets that should score C–B.
+  - _build_risk_issues: same key fix applied so issue generation matches scoring.
 """
 from typing import Any, Dict, List, Optional
 
@@ -96,20 +105,22 @@ def _score_web_security(fingerprint: Dict[str, Any]) -> float:
     grade = fingerprint.get("header_grade", "?")
     score += grade_penalties.get(grade, -20)
 
-    # HSTS
-    if not fingerprint.get("hsts"):
+    # HSTS — web_headers.py returns hsts_analysis: {present: bool, ...}
+    hsts = fingerprint.get("hsts_analysis", {})
+    if not hsts.get("present"):
         score -= 15
 
-    # Content Security Policy
-    if not fingerprint.get("csp"):
+    # Content Security Policy — web_headers.py returns csp_analysis: {present: bool, ...}
+    csp = fingerprint.get("csp_analysis", {})
+    if not csp.get("present"):
         score -= 10
 
-    # X-Frame-Options
-    if not fingerprint.get("x_frame_options"):
+    # X-Frame-Options and X-Content-Type-Options — check nested security dict
+    security = fingerprint.get("security", {})
+    if security.get("X-Frame-Options", "MISSING") == "MISSING":
         score -= 5
 
-    # X-Content-Type-Options
-    if not fingerprint.get("x_content_type_options"):
+    if security.get("X-Content-Type-Options", "MISSING") == "MISSING":
         score -= 5
 
     # Running over plain HTTP (no redirect to HTTPS)
@@ -220,9 +231,8 @@ def _score_technology(
     score -= outdated_count * 8
 
     # Amplify EOL penalty when high-risk subdomains are reachable
-    # Rationale: EOL software on domains with admin/dev/db subdomains = much larger blast radius
     if eol_count > 0 and high_risk_subdomain_count > 0:
-        amplifier = min(high_risk_subdomain_count, 5)  # Cap amplification at 5 subdomains
+        amplifier = min(high_risk_subdomain_count, 5)
         score -= eol_count * amplifier * 3
 
     return _clamp(score)
@@ -300,16 +310,22 @@ def _build_risk_issues(
         add("Unable to retrieve TLS certificate — HTTPS may not be configured", "HIGH", "tls")
 
     # --- Web Security ---
+    # Use correct keys from web_headers.py response structure
     if fingerprint:
         grade = fingerprint.get("header_grade", "?")
         if grade in ("D", "F"):
             add(f"Poor security header posture (grade {grade}) — missing critical browser protection headers", "HIGH", "web_security")
         elif grade == "C":
             add(f"Weak security header posture (grade {grade}) — several important headers missing", "MEDIUM", "web_security")
-        if not fingerprint.get("hsts"):
+
+        hsts = fingerprint.get("hsts_analysis", {})
+        if not hsts.get("present"):
             add("HSTS (HTTP Strict Transport Security) not configured — allows HTTP downgrade attacks", "HIGH", "web_security")
-        if not fingerprint.get("csp"):
+
+        csp = fingerprint.get("csp_analysis", {})
+        if not csp.get("present"):
             add("Content Security Policy (CSP) not configured — XSS attack surface is unrestricted", "MEDIUM", "web_security")
+
         if fingerprint.get("protocol") == "HTTP":
             add("Site accessible over unencrypted HTTP — all traffic is observable in transit", "HIGH", "web_security")
 
