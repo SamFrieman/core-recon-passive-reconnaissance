@@ -148,7 +148,7 @@ MODULE_TIMEOUT_BUFFER = 15
 # FastAPI app
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="CoreRecon API", version="2.2.1")
+app = FastAPI(title="CoreRecon API", version="2.2.2")
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -211,7 +211,7 @@ async def startup_event():
     log.info(
         "CoreRecon startup complete",
         extra={
-            "version": "2.2.1",
+            "version": "2.2.2",
             "modules_available": available,
             "modules_unavailable": unavailable,
             "cors_origins": ALLOWED_ORIGINS,
@@ -229,7 +229,7 @@ async def root():
     return {
         "status": "online",
         "service": "CoreRecon API",
-        "version": "2.2.1",
+        "version": "2.2.2",
         "modules": {m.key: m.is_available() for m in MODULE_REGISTRY},
     }
 
@@ -239,7 +239,7 @@ async def health(_: None = Depends(require_admin)):
     """Admin-only. Requires X-Admin-Token header."""
     return {
         "status": "healthy",
-        "version": "2.2.1",
+        "version": "2.2.2",
         "cache_size": len(scan_cache),
         "modules": {
             m.key: {"available": m.is_available(), "timeout": m.timeout_seconds}
@@ -276,7 +276,7 @@ async def recon(request: Request, domain: str):
     result["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     result["original_input"] = normalized.original_input
     result["input_type"] = normalized.input_type
-    result["corerecon_version"] = "2.2.1"
+    result["corerecon_version"] = "2.2.2"
 
     risk = result.get("risk", {})
     result["risk_score"] = risk.get("score", 0)

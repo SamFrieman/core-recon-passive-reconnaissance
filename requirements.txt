@@ -1,33 +1,32 @@
-# CoreRecon v2.0 — Backend Dependencies
-# All v1 dependencies preserved. New additions marked with # NEW
+# CoreRecon v2.2 — Backend Dependencies
 
 # Web framework
-fastapi
-uvicorn[standard]
+fastapi>=0.111,<1.0
+uvicorn[standard]>=0.30,<1.0
 
 # DNS resolution
-dnspython
+dnspython>=2.6,<3.0
 
 # WHOIS
-python-whois
+python-whois>=0.9,<1.0
 
 # HTTP client
-requests
+requests>=2.32,<3.0
 
-# Technology fingerprinting (preserved from v1)
-python-wappalyzer
+# Technology fingerprinting
+python-wappalyzer>=0.3,<1.0
 
-# PDF generation (preserved from v1)
-fpdf2
+# PDF generation
+fpdf2>=2.7,<3.0
 
-# Certificate parsing (preserved from v1)
-cryptography
+# Certificate parsing
+cryptography>=42.0,<46.0
 
-# TLD extraction for input normalization # NEW
-tldextract
+# TLD extraction for input normalization
+tldextract>=5.1,<6.0
 
-# Rate limiting # NEW
-slowapi
+# Rate limiting
+slowapi>=0.1.9,<1.0
 
 # Suppress SSL warnings in passive header checks
-urllib3
+urllib3>=2.2,<3.0
