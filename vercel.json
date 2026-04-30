@@ -6,10 +6,6 @@
     }
   ],
   "headers": [
-    ...
-  ]
-}
-  "headers": [
     {
       "source": "/api/(.*)",
       "headers": [
