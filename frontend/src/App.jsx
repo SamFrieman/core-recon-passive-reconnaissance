@@ -136,7 +136,7 @@ injectStyles();
 /* ─── Helpers ───────────────────────────────────────────────────────────── */
 // Use relative /api path — Vercel rewrites proxy this to Render backend.
 // For local dev, vite.config.js proxies /api → http://127.0.0.1:8000
-const API = "";
+const API = import.meta.env.VITE_API_URL || "";
 
 function riskClass(level) {
   return {
