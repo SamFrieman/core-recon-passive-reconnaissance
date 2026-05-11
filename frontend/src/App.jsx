@@ -763,12 +763,20 @@ export default function App() {
     setModuleStatus(null);
     setModuleTimings(null);
 
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 90_000);
+
     try {
-      const res = await fetch(`${API}/api/v1/recon/${encodeURIComponent(q)}`);
+      const res = await fetch(`${API}/api/v1/recon/${encodeURIComponent(q)}`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }));
-        throw new Error(err.detail || "Scan failed");
+        throw new Error(err.detail || `Request failed (${res.status})`);
       }
+
       const json = await res.json();
       setData(json);
       setModuleStatus(json.module_status ?? null);
@@ -780,7 +788,12 @@ export default function App() {
         .then(d => setHistory(Array.isArray(d) ? d : []))
         .catch(() => {});
     } catch (e) {
-      setError(e.message);
+      clearTimeout(timeout);
+      if (e.name === "AbortError") {
+        setError("Scan timed out — the backend may be cold-starting on Render free tier. Wait 30 seconds and try again.");
+      } else {
+        setError(e.message || "Scan failed — check browser console for details");
+      }
     } finally {
       setScanning(false);
     }
