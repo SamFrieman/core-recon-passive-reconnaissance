@@ -767,7 +767,7 @@ export default function App() {
       const res = await fetch(`${API}/api/v1/recon/${encodeURIComponent(q)}`);
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }));
-        throw new Error(err.detail ?? "Scan failed");
+        throw new Error(err.detail || "Scan failed");
       }
       const json = await res.json();
       setData(json);
