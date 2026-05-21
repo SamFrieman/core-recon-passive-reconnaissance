@@ -15,6 +15,7 @@ import re
 import time
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -90,6 +91,29 @@ async def require_admin(request: Request):
 
 limiter = Limiter(key_func=get_remote_address)
 
+
+# ---------------------------------------------------------------------------
+# Lifespan
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    available = [m.key for m in MODULE_REGISTRY if m.is_available()]
+    unavailable = [m.key for m in MODULE_REGISTRY if not m.is_available()]
+    log.info(
+        "CoreRecon startup complete",
+        extra={
+            "version": "2.2.2",
+            "modules_available": available,
+            "modules_unavailable": unavailable,
+            "cors_origins": ALLOWED_ORIGINS,
+            "admin_token_set": bool(_ADMIN_TOKEN),
+        },
+    )
+    yield
+
+
 # ---------------------------------------------------------------------------
 # Module imports
 # ---------------------------------------------------------------------------
@@ -148,7 +172,7 @@ MODULE_TIMEOUT_BUFFER = 15
 # FastAPI app
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="CoreRecon API", version="2.2.2")
+app = FastAPI(title="CoreRecon API", version="2.2.2", lifespan=lifespan)
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -201,23 +225,6 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-async def startup_event():
-    init_db()
-    available = [m.key for m in MODULE_REGISTRY if m.is_available()]
-    unavailable = [m.key for m in MODULE_REGISTRY if not m.is_available()]
-    log.info(
-        "CoreRecon startup complete",
-        extra={
-            "version": "2.2.2",
-            "modules_available": available,
-            "modules_unavailable": unavailable,
-            "cors_origins": ALLOWED_ORIGINS,
-            "admin_token_set": bool(_ADMIN_TOKEN),
-        },
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +365,7 @@ def _run_modules_concurrently(target: str) -> Tuple[Dict[str, Any], Dict[str, An
 
     with ThreadPoolExecutor(max_workers=len(MODULE_REGISTRY), thread_name_prefix="cr") as executor:
         future_map: Dict[Any, ModuleSpec] = {}
+        submission_times: Dict[Any, float] = {}
 
         for spec in MODULE_REGISTRY:
             if not spec.is_available():
@@ -365,12 +373,14 @@ def _run_modules_concurrently(target: str) -> Tuple[Dict[str, Any], Dict[str, An
                 module_status[spec.key] = {"status": "UNAVAILABLE", "reason": "Import failed", "available": False}
                 module_timings[spec.key] = 0
                 continue
+            t_submit = time.monotonic()
             future = executor.submit(spec.fn, target)
             future_map[future] = spec
+            submission_times[future] = t_submit
 
         for future in as_completed(future_map, timeout=max_timeout):
             spec = future_map[future]
-            t_start = time.monotonic()
+            t_start = submission_times[future]
 
             try:
                 result = future.result(timeout=spec.timeout_seconds)
