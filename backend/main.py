@@ -305,6 +305,92 @@ async def history(_: None = Depends(require_admin)):
     return get_all_history()
 
 
+@app.get("/api/v1/compare")
+@limiter.limit("3/minute")
+async def compare(request: Request, targets: str):
+    """
+    Run scans on two domains concurrently and return a side-by-side comparison.
+
+    Usage: /api/v1/compare?targets=domain1.com,domain2.com
+    """
+    raw_targets = [t.strip() for t in targets.split(",") if t.strip()]
+    if len(raw_targets) != 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide exactly two comma-separated domains via the 'targets' parameter.",
+        )
+
+    validated: list[str] = []
+    for raw in raw_targets:
+        try:
+            validated.append(validate_scan_input(raw))
+        except HTTPException as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid target '{raw}': {exc.detail}")
+
+    resolved: list[str] = []
+    for v in validated:
+        try:
+            n = normalize_target(v)
+            resolved.append(n.target)
+        except HardFailError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    # Scan both domains concurrently using a thread pool
+    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+
+    scan_results: dict[str, Any] = {}
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="compare") as pool:
+        future_to_target = {pool.submit(run_scan, t): t for t in resolved}
+        for future in _as_completed(future_to_target):
+            t = future_to_target[future]
+            try:
+                scan_results[t] = future.result()
+            except Exception as exc:
+                log.error(f"Compare scan failed for {t}: {exc}")
+                raise HTTPException(status_code=500, detail=f"Scan failed for {t}")
+
+    def _summary(target: str) -> dict:
+        data = scan_results[target]
+        risk = data.get("risk", {})
+        return {
+            "target": target,
+            "risk_score": risk.get("score", 0),
+            "risk_grade": risk.get("grade", "F"),
+            "risk_level": _score_to_level(risk.get("score", 0)),
+            "open_ports": data.get("infrastructure", {}).get("open_ports", []),
+            "tls_valid": data.get("ssl_certificate", {}).get("valid", False),
+            "spf_present": data.get("dns", {}).get("spf", {}).get("present", False),
+            "dmarc_present": data.get("dns", {}).get("dmarc", {}).get("present", False),
+            "dnssec_enabled": data.get("dns", {}).get("dnssec", {}).get("enabled", False),
+            "subdomain_count": data.get("subdomains", {}).get("total_found", 0),
+            "cdn_detected": data.get("infrastructure", {}).get("cdn", {}).get("detected", False),
+            "top_risks": [
+                i.get("issue", "")
+                for i in risk.get("risk_issues", [])[:3]
+            ],
+            "recommendations": _build_recommendations(risk.get("risk_issues", [])),
+            "scan_duration_seconds": data.get("scan_duration_seconds", 0),
+        }
+
+    a, b = resolved
+    summary_a, summary_b = _summary(a), _summary(b)
+    score_a, score_b = summary_a["risk_score"], summary_b["risk_score"]
+
+    verdict = (
+        f"{a} has a stronger security posture (score {score_a} vs {score_b})."
+        if score_a > score_b
+        else f"{b} has a stronger security posture (score {score_b} vs {score_a})."
+        if score_b > score_a
+        else f"Both targets have an equal risk score of {score_a}."
+    )
+
+    return JSONResponse(content={
+        "comparison": [summary_a, summary_b],
+        "verdict": verdict,
+        "score_delta": abs(score_a - score_b),
+    })
+
+
 @app.get("/api/v1/report/{domain:path}")
 @limiter.limit("5/minute")
 async def report(request: Request, domain: str):
